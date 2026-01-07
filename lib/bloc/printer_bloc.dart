@@ -15,6 +15,8 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
 
   // Reconexión automática (cuando se apaga/enciende la impresora)
   Timer? _reconnectTimer;
+  Timer? _printClearTimer;
+
   int _reconnectAttempt = 0;
   int _noResponseCount = 0;
 
@@ -47,6 +49,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     on<StatusUpdatedEvent>(_onStatusUpdated);
     on<ClearErrorEvent>(_onClearError);
     on<ResetPrinterEvent>(_onResetPrinter);
+
+    on<PrintTicketEvent>(_onPrintTicket);
+    on<ClearPrintStatusEvent>(_onClearPrintStatus);
 
     // Al iniciar, listar impresoras e intentar conectar a la primera disponible
     add(LoadPrintersEvent());
@@ -447,6 +452,93 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     }
   }
 
+  Future<void> _onPrintTicket(
+    PrintTicketEvent event,
+    Emitter<PrinterBlocState> emit,
+  ) async {
+    // Evitar doble click
+    if (state.printStatus == PrintStatus.printing) return;
+
+    // Solo si está conectado
+    if (state.connectionStatus != PrinterConnectionStatus.connected) {
+      emit(
+        state.copyWith(
+          printStatus: PrintStatus.error,
+          printMessage: 'No hay impresora conectada',
+        ),
+      );
+      _scheduleClearPrintChip();
+      return;
+    }
+
+    _printClearTimer?.cancel();
+    emit(state.copyWith(printStatus: PrintStatus.printing, printMessage: null));
+
+    _log('PrintTest: iniciando...');
+
+    try {
+      final ready = await validateBeforeCriticalPoint('print_test');
+      if (!ready) {
+        _log('PrintTest: impresora no lista');
+        emit(
+          state.copyWith(
+            printStatus: PrintStatus.error,
+            printMessage: 'Impresora no lista (papel/tapa/offline)',
+          ),
+        );
+        _scheduleClearPrintChip();
+        return;
+      }
+
+      final data = _buildSampleTicket();
+      final ok = await _printerService.sendRawData(data);
+
+      if (ok) {
+        _log('PrintTest: OK');
+        emit(
+          state.copyWith(
+            printStatus: PrintStatus.success,
+            printMessage: 'Impresión enviada',
+          ),
+        );
+      } else {
+        _log('PrintTest: FAIL (sendRawData false)');
+        emit(
+          state.copyWith(
+            printStatus: PrintStatus.error,
+            printMessage: 'No se pudo enviar el ticket',
+          ),
+        );
+      }
+    } catch (e) {
+      _log('PrintTest: exception $e');
+      emit(
+        state.copyWith(
+          printStatus: PrintStatus.error,
+          printMessage: 'Error imprimiendo: $e',
+        ),
+      );
+    } finally {
+      _scheduleClearPrintChip();
+    }
+  }
+
+  void _scheduleClearPrintChip() {
+    _printClearTimer?.cancel();
+    _printClearTimer = Timer(const Duration(seconds: 3), () {
+      add(const ClearPrintStatusEvent());
+    });
+  }
+
+  void _onClearPrintStatus(
+    ClearPrintStatusEvent event,
+    Emitter<PrinterBlocState> emit,
+  ) {
+    emit(
+      state.copyWith(printStatus: PrintStatus.idle, clearPrintMessage: true),
+    );
+  }
+
   void _startAutoReconnect() {
     if (_reconnectTimer != null) return;
     _reconnectAttempt = 0;
@@ -660,6 +752,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
 
   @override
   Future<void> close() async {
+    _printClearTimer?.cancel();
     _monitoringTimer?.cancel();
     _stopAutoReconnect();
     await _printerService.disconnect();

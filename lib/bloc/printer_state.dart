@@ -1,6 +1,8 @@
 import 'package:equatable/equatable.dart';
 import '../models/printer_status.dart';
 
+enum PrintStatus { idle, printing, success, error }
+
 /// Estado del sistema de impresión
 class PrinterBlocState extends Equatable {
   final List<PrinterDevice> availablePrinters;
@@ -10,6 +12,8 @@ class PrinterBlocState extends Equatable {
   final bool isMonitoring;
   final String? errorMessage;
   final bool isLoading;
+  final PrintStatus printStatus;
+  final String? printMessage;
 
   const PrinterBlocState({
     this.availablePrinters = const [],
@@ -19,6 +23,8 @@ class PrinterBlocState extends Equatable {
     this.isMonitoring = false,
     this.errorMessage,
     this.isLoading = false,
+    this.printStatus = PrintStatus.idle,
+    this.printMessage,
   });
 
   /// Estado inicial
@@ -34,8 +40,8 @@ class PrinterBlocState extends Equatable {
   }
 
   /// Indica si hay un error que debe mostrarse
-  bool get hasError => errorMessage != null || 
-      (printerStatus?.hasError ?? false);
+  bool get hasError =>
+      errorMessage != null || (printerStatus?.hasError ?? false);
 
   /// Mensaje de error combinado
   String? get displayErrorMessage {
@@ -54,7 +60,10 @@ class PrinterBlocState extends Equatable {
     bool? isMonitoring,
     String? errorMessage,
     bool? isLoading,
+    PrintStatus? printStatus,
+    String? printMessage,
     bool clearError = false,
+    bool clearPrintMessage = false,
   }) {
     return PrinterBlocState(
       availablePrinters: availablePrinters ?? this.availablePrinters,
@@ -64,17 +73,23 @@ class PrinterBlocState extends Equatable {
       isMonitoring: isMonitoring ?? this.isMonitoring,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       isLoading: isLoading ?? this.isLoading,
+      printStatus: printStatus ?? this.printStatus,
+      printMessage: clearPrintMessage
+          ? null
+          : (printMessage ?? this.printMessage),
     );
   }
 
   @override
   List<Object?> get props => [
-        availablePrinters,
-        selectedPrinter,
-        connectionStatus,
-        printerStatus,
-        isMonitoring,
-        errorMessage,
-        isLoading,
-      ];
+    availablePrinters,
+    selectedPrinter,
+    connectionStatus,
+    printerStatus,
+    isMonitoring,
+    errorMessage,
+    isLoading,
+    printStatus,
+    printMessage,
+  ];
 }

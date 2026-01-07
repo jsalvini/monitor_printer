@@ -36,6 +36,35 @@ class PrinterMonitorScreen extends StatelessWidget {
         state.connectionStatus == PrinterConnectionStatus.connecting;
   }
 
+  Widget _buildPrintChip(PrinterBlocState state) {
+    switch (state.printStatus) {
+      case PrintStatus.printing:
+        return const Chip(
+          avatar: SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          label: Text('Imprimiendo…'),
+        );
+
+      case PrintStatus.success:
+        return Chip(
+          avatar: const Icon(Icons.check_circle, size: 18),
+          label: Text(state.printMessage ?? 'Impresión OK'),
+        );
+
+      case PrintStatus.error:
+        return Chip(
+          avatar: const Icon(Icons.error, size: 18),
+          label: Text(state.printMessage ?? 'Error al imprimir'),
+        );
+
+      case PrintStatus.idle:
+        return const SizedBox.shrink();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -147,7 +176,11 @@ class PrinterMonitorScreen extends StatelessWidget {
                             ],
                           ),
                         ),
-
+                      if (state.printStatus != PrintStatus.idle)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Center(child: _buildPrintChip(state)),
+                        ),
                       if (_shouldShowReconnectChip(state))
                         Padding(
                           padding: const EdgeInsets.only(top: 10),
@@ -389,9 +422,17 @@ class _ActionButtons extends StatelessWidget {
         const SizedBox(width: 12),
         Expanded(
           child: OutlinedButton.icon(
-            onPressed: isConnected && !state.isLoading
+            /*onPressed: isConnected && !state.isLoading
                 ? () => _printTest(context)
+                : null,*/
+            onPressed:
+                isConnected &&
+                    !state.isLoading &&
+                    state.printStatus != PrintStatus.printing
+                ? () =>
+                      context.read<PrinterBloc>().add(const PrintTicketEvent())
                 : null,
+
             icon: const Icon(Icons.receipt_long),
             label: const Text('Imprimir prueba'),
             style: OutlinedButton.styleFrom(

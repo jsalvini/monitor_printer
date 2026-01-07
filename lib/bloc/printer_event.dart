@@ -63,3 +63,11 @@ class ClearErrorEvent extends PrinterEvent {}
 
 /// Reinicia el estado de la impresora
 class ResetPrinterEvent extends PrinterEvent {}
+
+class PrintTicketEvent extends PrinterEvent {
+  const PrintTicketEvent();
+}
+
+class ClearPrintStatusEvent extends PrinterEvent {
+  const ClearPrintStatusEvent();
+}
