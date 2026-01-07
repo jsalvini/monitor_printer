@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:developer';
+import 'dart:developer' as dev;
 import 'dart:typed_data';
 import 'package:ti_printer_plugin/ti_printer_plugin.dart';
 import '../models/printer_status.dart';
@@ -11,19 +11,23 @@ class PrinterService {
 
   PrinterService() : _plugin = TiPrinterPlugin();
 
-  /// Obtiene lista de impresoras USB disponible
+  void _log(String message) {
+    dev.log('🖨️ $message', name: 'PrinterService');
+  }
+
+  /// Obtiene lista de impresoras USB disponibles
   Future<List<PrinterDevice>> getAvailablePrinters() async {
     try {
       final devices = await _plugin.getUsbPrinters();
-      return devices
-          .map(
-            (devicePath) => PrinterDevice(
-              devicePath: devicePath,
-              displayName: _extractDeviceName(devicePath),
-              isConnected: devicePath == _currentDevicePath,
-            ),
-          )
-          .toList();
+      _log('getUsbPrinters -> ${devices.length} dispositivos');
+      return devices.map((devicePath) {
+        final name = _extractDeviceName(devicePath);
+        return PrinterDevice(
+          devicePath: devicePath,
+          displayName: name,
+          isConnected: devicePath == _currentDevicePath,
+        );
+      }).toList();
     } catch (e) {
       throw PrinterServiceException('Error al obtener impresoras: $e');
     }
@@ -32,11 +36,14 @@ class PrinterService {
   /// Conecta con una impresora específica
   Future<bool> connect(String devicePath) async {
     try {
-      // Cerrar cualquier conexión previa (por si quedó el puerto abierto)
+      _log('connect($devicePath)');
+
+      // Cerrar cualquier conexión previa (por si quedó un handle viejo)
       await _safeCloseUsbPort();
       _currentDevicePath = null;
 
       final success = await _plugin.openUsbPort(devicePath);
+      _log('openUsbPort -> $success');
 
       if (success == true) {
         _currentDevicePath = devicePath;
@@ -52,9 +59,11 @@ class PrinterService {
   /// Desconecta de la impresora actual
   Future<void> disconnect() async {
     try {
+      _log('disconnect()');
       await _safeCloseUsbPort();
-    } catch (_) {
-      // Ignorar (puede fallar si el dispositivo ya no existe)
+    } catch (e) {
+      // Puede fallar si el dispositivo ya no existe; igual limpiamos estado
+      _log('disconnect error (ignorado): $e');
     } finally {
       _currentDevicePath = null;
     }
@@ -71,14 +80,15 @@ class PrinterService {
     }
 
     try {
-      // Comando DLE EOT 1 (0x10 0x04 0x01) - Estado online
+      // DLE EOT 1 - Estado online
       final onlineCmd = Uint8List.fromList([0x10, 0x04, 0x01]);
       final onlineResponse = await _plugin.readStatusUsb(onlineCmd);
 
-      // Si no hay respuesta, validar si el dispositivo sigue presente en el sistema
+      // Si no responde, verificar si el dispositivo sigue presente
       if (onlineResponse == null || onlineResponse.isEmpty) {
         final present = await _isDevicePresent(devicePath);
         if (!present) {
+          _log('checkStatus: devicePath ya no está presente -> deviceNotFound');
           await _safeCloseUsbPort();
           _currentDevicePath = null;
           return PrinterStatus.withError(
@@ -93,39 +103,20 @@ class PrinterService {
         );
       }
 
-      // Comando DLE EOT 4 (0x10 0x04 0x04) - Estado del papel
+      // DLE EOT 4 - Estado del papel
       final paperCmd = Uint8List.fromList([0x10, 0x04, 0x04]);
       final paperResponse = await _plugin.readStatusUsb(paperCmd);
 
-      // Comando DLE EOT 2 (0x10 0x04 0x02) - Causa de offline
+      // DLE EOT 2 - Causa de offline
       final offlineCmd = Uint8List.fromList([0x10, 0x04, 0x02]);
       final offlineResponse = await _plugin.readStatusUsb(offlineCmd);
 
-      final status = _interpretStatus(
-        onlineResponse,
-        paperResponse,
-        offlineResponse,
-      );
-
-      // Si el status resultó "no responde", validar presencia del devicePath (apagado/desconectado)
-      if (status.hasError &&
-          status.errorType == PrinterErrorType.offline &&
-          status.errorMessage == 'Impresora no responde') {
-        final present = await _isDevicePresent(devicePath);
-        if (!present) {
-          await _safeCloseUsbPort();
-          _currentDevicePath = null;
-          return PrinterStatus.withError(
-            PrinterErrorType.deviceNotFound,
-            'Impresora desconectada',
-          );
-        }
-      }
-
-      return status;
+      return _interpretStatus(onlineResponse, paperResponse, offlineResponse);
     } catch (e) {
+      // Si el dispositivo ya no existe, tratar como desconectada
       final present = await _isDevicePresent(devicePath);
       if (!present) {
+        _log('checkStatus exception + device ausente -> deviceNotFound ($e)');
         await _safeCloseUsbPort();
         _currentDevicePath = null;
         return PrinterStatus.withError(
@@ -141,7 +132,7 @@ class PrinterService {
     }
   }
 
-  /// Envía datos raw a la impresora
+  /// Envía datos crudos a la impresora
   Future<bool> sendRawData(Uint8List data) async {
     if (_currentDevicePath == null) {
       throw PrinterServiceException('No hay impresora conectada');
@@ -166,7 +157,6 @@ class PrinterService {
   Future<void> _safeCloseUsbPort() async {
     try {
       //await _plugin.closeUsbPort();
-      log('Cerrar puerto USB');
     } catch (_) {
       // Ignorar
     }
@@ -184,8 +174,19 @@ class PrinterService {
   // ==================== MÉTODOS PRIVADOS ====================
 
   String _extractDeviceName(String devicePath) {
-    final parts = devicePath.split('/');
-    return parts.isNotEmpty ? parts.last : devicePath;
+    // Extraer nombre legible del path
+    // Ejemplo: /dev/usb/lp1 -> "Impresora USB LP1"
+    if (devicePath.contains('lp')) {
+      final lpNum = devicePath.split('lp').last;
+      return 'Impresora USB LP$lpNum';
+    } else if (devicePath.contains('ttyUSB')) {
+      final usbNum = devicePath.split('ttyUSB').last;
+      return 'Puerto Serial USB$usbNum';
+    } else if (devicePath.contains('ttyACM')) {
+      final acmNum = devicePath.split('ttyACM').last;
+      return 'Puerto ACM$acmNum';
+    }
+    return devicePath.split('/').last.toUpperCase();
   }
 
   PrinterStatus _interpretStatus(
@@ -202,10 +203,10 @@ class PrinterService {
     }
 
     final onlineByte = onlineResponse[0];
-    final paperByte = paperResponse != null && paperResponse.isNotEmpty
+    final paperByte = (paperResponse != null && paperResponse.isNotEmpty)
         ? paperResponse[0]
         : 0xFF;
-    final offlineByte = offlineResponse != null && offlineResponse.isNotEmpty
+    final offlineByte = (offlineResponse != null && offlineResponse.isNotEmpty)
         ? offlineResponse[0]
         : 0x00;
 

@@ -10,6 +10,32 @@ import '../widgets/printer_status_indicator.dart';
 class PrinterMonitorScreen extends StatelessWidget {
   const PrinterMonitorScreen({super.key});
 
+  bool _isDisconnectError(PrinterBlocState state) {
+    final type = state.printerStatus?.errorType;
+    if (type == PrinterErrorType.deviceNotFound ||
+        type == PrinterErrorType.communicationError) {
+      return true;
+    }
+
+    final msg = state.displayErrorMessage?.toLowerCase() ?? '';
+    if (state.connectionStatus != PrinterConnectionStatus.connected &&
+        (msg.contains('desconect') || msg.contains('no hay impresora'))) {
+      return true;
+    }
+
+    return false;
+  }
+
+  bool _shouldShowReconnectChip(PrinterBlocState state) {
+    // Se muestra cuando la desconexión fue por pérdida del dispositivo/comunicación
+    // y hay una impresora seleccionada (por lo tanto el sistema intentará reconectar).
+    if (!_isDisconnectError(state)) return false;
+    if (state.selectedPrinter == null) return false;
+
+    return state.connectionStatus == PrinterConnectionStatus.disconnected ||
+        state.connectionStatus == PrinterConnectionStatus.connecting;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -42,49 +68,105 @@ class PrinterMonitorScreen extends StatelessWidget {
         ],
       ),
       body: BlocConsumer<PrinterBloc, PrinterBlocState>(
+        listenWhen: (previous, current) {
+          final prevMsg = previous.displayErrorMessage;
+          final currMsg = current.displayErrorMessage;
+
+          // Solo reaccionar cuando el mensaje cambia (evita SnackBars repetidos por el polling)
+          if (currMsg == null) return false;
+          if (prevMsg == currMsg) return false;
+
+          // La desconexión se muestra de forma persistente en pantalla, no como SnackBar
+          return !_isDisconnectError(current);
+        },
         listener: (context, state) {
-          // Mostrar errores en SnackBar
-          if (state.displayErrorMessage != null) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(Icons.error, color: Colors.white),
-                    const SizedBox(width: 12),
-                    Expanded(child: Text(state.displayErrorMessage!)),
-                  ],
-                ),
-                backgroundColor: Colors.red.shade700,
-                behavior: SnackBarBehavior.floating,
-                action: SnackBarAction(
-                  label: 'OK',
-                  textColor: Colors.white,
-                  onPressed: () {
-                    context.read<PrinterBloc>().add(ClearErrorEvent());
-                  },
-                ),
-                duration: const Duration(seconds: 5),
+          final message = state.displayErrorMessage;
+          if (message == null) return;
+
+          final messenger = ScaffoldMessenger.of(context);
+          messenger.hideCurrentSnackBar();
+          messenger.showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.error, color: Colors.white),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(message)),
+                ],
               ),
-            );
-          }
+              backgroundColor: Colors.red.shade700,
+              behavior: SnackBarBehavior.floating,
+              action: SnackBarAction(
+                label: 'OK',
+                textColor: Colors.white,
+                onPressed: () {
+                  context.read<PrinterBloc>().add(ClearErrorEvent());
+                },
+              ),
+              duration: const Duration(seconds: 4),
+            ),
+          );
         },
         builder: (context, state) {
           return SafeArea(
             child: Column(
               children: [
                 // Indicador de estado compacto en la parte superior
-                if (state.connectionStatus == PrinterConnectionStatus.connected)
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    color: Colors.grey.shade100,
-                    child: Center(
-                      child: PrinterStatusIndicator(
-                        status: state.printerStatus,
-                        connectionStatus: state.connectionStatus,
-                        isCompact: true,
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  color: Colors.grey.shade100,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Center(
+                        child: PrinterStatusIndicator(
+                          status: state.printerStatus,
+                          connectionStatus: state.connectionStatus,
+                          isCompact: true,
+                        ),
                       ),
-                    ),
+                      if (_isDisconnectError(state))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.usb_off,
+                                size: 16,
+                                color: Colors.red.shade700,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Impresora desconectada',
+                                style: TextStyle(
+                                  color: Colors.red.shade700,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                      if (_shouldShowReconnectChip(state))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Center(
+                            child: Chip(
+                              avatar: const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                              label: const Text('Reconectando…'),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
+                ),
 
                 Expanded(
                   child: SingleChildScrollView(
@@ -105,12 +187,10 @@ class PrinterMonitorScreen extends StatelessWidget {
                         const SizedBox(height: 24),
 
                         // Estado detallado
-                        if (state.connectionStatus ==
-                            PrinterConnectionStatus.connected)
-                          PrinterStatusIndicator(
-                            status: state.printerStatus,
-                            connectionStatus: state.connectionStatus,
-                          ),
+                        PrinterStatusIndicator(
+                          status: state.printerStatus,
+                          connectionStatus: state.connectionStatus,
+                        ),
 
                         const SizedBox(height: 24),
 
@@ -196,30 +276,59 @@ class _PrinterSelector extends StatelessWidget {
                 style: TextStyle(color: Colors.grey),
               )
             else
-              DropdownButtonFormField<String>(
-                initialValue: selectedPrinter?.devicePath,
-                decoration: InputDecoration(
-                  labelText: 'Seleccionar impresora',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  prefixIcon: const Icon(Icons.print),
-                ),
-                items: availablePrinters.map((printer) {
-                  return DropdownMenuItem(
-                    value: printer.devicePath,
-                    child: Text(printer.displayName),
-                  );
-                }).toList(),
-                onChanged: isConnected
-                    ? null
-                    : (value) {
-                        if (value != null) {
-                          context.read<PrinterBloc>().add(
-                            SelectPrinterEvent(value),
+              Builder(
+                builder: (context) {
+                  final selectedValue =
+                      selectedPrinter != null &&
+                          availablePrinters.any(
+                            (p) => p.devicePath == selectedPrinter!.devicePath,
+                          )
+                      ? selectedPrinter!.devicePath
+                      : null;
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedValue,
+                        decoration: InputDecoration(
+                          labelText: 'Seleccionar impresora',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          prefixIcon: const Icon(Icons.print),
+                        ),
+                        items: availablePrinters.map((printer) {
+                          return DropdownMenuItem(
+                            value: printer.devicePath,
+                            child: Text(printer.displayName),
                           );
-                        }
-                      },
+                        }).toList(),
+                        onChanged: isConnected
+                            ? null
+                            : (value) {
+                                if (value != null) {
+                                  context.read<PrinterBloc>().add(
+                                    SelectPrinterEvent(value),
+                                  );
+                                }
+                              },
+                      ),
+
+                      if (selectedPrinter != null && selectedValue == null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(
+                            'Última seleccionada: ${selectedPrinter!.displayName} (el puerto puede cambiar al reconectar)',
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
               ),
           ],
         ),
