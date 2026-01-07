@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:rxdart/rxdart.dart';
 import '../models/printer_status.dart';
@@ -59,6 +60,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         );
       }
     } catch (e) {
+      log('Error al buscar impresoras: $e');
       emit(
         state.copyWith(
           errorMessage: 'Error al buscar impresoras: $e',
@@ -125,6 +127,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         );
       }
     } catch (e) {
+      log('Error al conectar: $e');
       emit(
         state.copyWith(
           connectionStatus: PrinterConnectionStatus.error,
@@ -156,6 +159,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         ),
       );
     } catch (e) {
+      log('Error al desconectar: $e');
       emit(
         state.copyWith(
           errorMessage: 'Error al desconectar: $e',
@@ -207,6 +211,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       final status = await _printerService.checkStatus();
       add(StatusUpdatedEvent(status));
     } catch (e) {
+      log('Error al verificar estado: $e');
       emit(state.copyWith(errorMessage: 'Error al verificar estado: $e'));
     }
   }
@@ -257,6 +262,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       add(StatusUpdatedEvent(status));
       return status.isReadyToPrint;
     } catch (e) {
+      log('Error al verificar estado antes de punto crítico: $e');
       return false;
     }
   }
