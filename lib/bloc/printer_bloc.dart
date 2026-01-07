@@ -6,6 +6,7 @@ import '../models/printer_status.dart';
 import '../services/printer_service.dart';
 import 'printer_event.dart';
 import 'printer_state.dart';
+import 'dart:typed_data';
 
 /// BLoC que gestiona el estado y lógica de la impresora
 class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
@@ -19,6 +20,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
 
   // Auto-conexión al iniciar: conectar a la primera impresora disponible
   bool _startupAutoConnectHandled = false;
+  bool _isPrinting = false;
 
   static const Duration _reconnectMinDelay = Duration(milliseconds: 500);
   static const Duration _reconnectMaxDelay = Duration(seconds: 10);
@@ -569,6 +571,69 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     } catch (e) {
       return false;
     }
+  }
+
+  Future<bool> printTestTicket() async {
+    if (_isPrinting) return false;
+    _isPrinting = true;
+
+    try {
+      // Validación final (estado + dispara StatusUpdatedEvent)
+      final isReady = await validateBeforeCriticalPoint('print_test');
+      if (!isReady) return false;
+
+      final data = _buildSampleTicket();
+      final ok = await _printerService.sendRawData(data);
+      return ok;
+    } catch (_) {
+      return false;
+    } finally {
+      _isPrinting = false;
+    }
+  }
+
+  Uint8List _buildSampleTicket() {
+    final List<int> commands = [];
+
+    // ESC @ - Inicializar impresora
+    commands.addAll([0x1B, 0x40]);
+
+    // ESC a 1 - Centrar
+    commands.addAll([0x1B, 0x61, 0x01]);
+    commands.addAll('IMPRESION DE PRUEBA\n'.codeUnits);
+
+    // Negrita ON
+    commands.addAll([0x1B, 0x45, 0x01]);
+    commands.addAll('MONITOR PRINTER\n'.codeUnits);
+    // Negrita OFF
+    commands.addAll([0x1B, 0x45, 0x00]);
+
+    commands.addAll('\n'.codeUnits);
+    commands.addAll('--------------------------------\n'.codeUnits);
+
+    // Izquierda
+    commands.addAll([0x1B, 0x61, 0x00]);
+
+    final now = DateTime.now();
+    commands.addAll(
+      'Fecha: ${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}\n'
+          .codeUnits,
+    );
+    commands.addAll(
+      'Hora: ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}\n'
+          .codeUnits,
+    );
+    commands.addAll('\n'.codeUnits);
+
+    commands.addAll('Si ves este ticket, la\n'.codeUnits);
+    commands.addAll('conexion y el envio OK.\n'.codeUnits);
+
+    commands.addAll('\n\n\n'.codeUnits);
+
+    // Corte
+    commands.addAll([0x1D, 0x56, 0x42, 0x00]);
+
+    return Uint8List.fromList(commands);
   }
 
   // ==================== MÉTODOS PRIVADOS ====================
