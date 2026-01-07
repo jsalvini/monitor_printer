@@ -11,7 +11,7 @@ abstract class PrinterEvent extends Equatable {
 /// Solicita la lista de impresoras disponibles
 class LoadPrintersEvent extends PrinterEvent {}
 
-/// Selecciona una impresora para conectar
+/// Selecciona una impresora
 class SelectPrinterEvent extends PrinterEvent {
   final String devicePath;
 
@@ -21,13 +21,13 @@ class SelectPrinterEvent extends PrinterEvent {
   List<Object?> get props => [devicePath];
 }
 
-/// Inicia la conexión con la impresora seleccionada
+/// Conecta con la impresora seleccionada
 class ConnectPrinterEvent extends PrinterEvent {}
 
-/// Desconecta de la impresora actual
+/// Desconecta la impresora
 class DisconnectPrinterEvent extends PrinterEvent {}
 
-/// Inicia el monitoreo automático del estado
+/// Inicia el monitoreo automático
 class StartMonitoringEvent extends PrinterEvent {
   final Duration interval;
 
@@ -43,9 +43,14 @@ class StopMonitoringEvent extends PrinterEvent {}
 /// Solicita verificación manual del estado
 class CheckStatusEvent extends PrinterEvent {}
 
+/// Evento interno: tick para reintentos de reconexión automática
+class AutoReconnectTickEvent extends PrinterEvent {
+  const AutoReconnectTickEvent();
+}
+
 /// Actualización del estado desde el monitoreo
 class StatusUpdatedEvent extends PrinterEvent {
-  final dynamic status; // PrinterStatus
+  final dynamic status;
 
   const StatusUpdatedEvent(this.status);
 
@@ -53,8 +58,8 @@ class StatusUpdatedEvent extends PrinterEvent {
   List<Object?> get props => [status];
 }
 
-/// Limpia un error temporal
+/// Limpia errores
 class ClearErrorEvent extends PrinterEvent {}
 
-/// Reinicia el sistema de impresión
+/// Reinicia el estado de la impresora
 class ResetPrinterEvent extends PrinterEvent {}
