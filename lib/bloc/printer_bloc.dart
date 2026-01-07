@@ -17,6 +17,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
   int _reconnectAttempt = 0;
   int _noResponseCount = 0;
 
+  // Auto-conexión al iniciar: conectar a la primera impresora disponible
+  bool _startupAutoConnectHandled = false;
+
   static const Duration _reconnectMinDelay = Duration(milliseconds: 500);
   static const Duration _reconnectMaxDelay = Duration(seconds: 10);
 
@@ -42,6 +45,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     on<StatusUpdatedEvent>(_onStatusUpdated);
     on<ClearErrorEvent>(_onClearError);
     on<ResetPrinterEvent>(_onResetPrinter);
+
+    // Al iniciar, listar impresoras e intentar conectar a la primera disponible
+    add(LoadPrintersEvent());
   }
 
   // ==================== HANDLERS DE EVENTOS ====================
@@ -57,7 +63,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       _log('USB printers detectadas: ${printers.length}');
 
       if (printers.isEmpty) {
-        _log('No hay impresoras detectadas (reintentando)');
         emit(
           state.copyWith(
             availablePrinters: [],
@@ -65,15 +70,40 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
             isLoading: false,
           ),
         );
-      } else {
-        _log('Conexión fallida');
-        emit(
-          state.copyWith(
-            availablePrinters: printers,
-            isLoading: false,
-            clearError: true,
-          ),
-        );
+
+        // ✅ Solo una vez al arranque: empezar a reintentar hasta que aparezca una
+        if (!_startupAutoConnectHandled) {
+          _startupAutoConnectHandled = true;
+          _startAutoReconnect(); // tu tick ya conecta a la primera si selected == null
+        }
+        return;
+      }
+
+      final shouldAutoConnect =
+          !_startupAutoConnectHandled &&
+          state.connectionStatus == PrinterConnectionStatus.disconnected &&
+          state.selectedPrinter == null;
+
+      final selectedForUi = shouldAutoConnect
+          ? printers.first
+          : state.selectedPrinter;
+
+      emit(
+        state.copyWith(
+          availablePrinters: printers,
+          selectedPrinter: selectedForUi,
+          isLoading: false,
+          clearError: true,
+        ),
+      );
+
+      if (shouldAutoConnect) {
+        _startupAutoConnectHandled = true;
+        _log('Auto-connect inicio: conectando a ${printers.first.devicePath}');
+        add(ConnectPrinterEvent()); // conecta e inicia monitoreo
+      } else if (!_startupAutoConnectHandled) {
+        // Consume la bandera igualmente (para que no haga autoconnect en reloads manuales)
+        _startupAutoConnectHandled = true;
       }
     } catch (e) {
       emit(
@@ -82,6 +112,12 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           isLoading: false,
         ),
       );
+
+      // Si falla al inicio, también podés optar por reintentar (solo una vez)
+      if (!_startupAutoConnectHandled) {
+        _startupAutoConnectHandled = true;
+        _startAutoReconnect();
+      }
     }
   }
 
@@ -149,6 +185,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
             isLoading: false,
           ),
         );
+
+        // Reintentar automáticamente (útil en inicio o si el puerto estaba en transición)
+        _startAutoReconnect();
       }
     } catch (e) {
       emit(
@@ -158,6 +197,8 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           isLoading: false,
         ),
       );
+
+      _startAutoReconnect();
     }
   }
 
@@ -253,9 +294,65 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     }
 
     final selected = state.selectedPrinter;
+    // Si no hay impresora seleccionada (por ejemplo al iniciar),
+    // intentar conectar a la primera disponible cuando aparezca.
     if (selected == null) {
-      _stopAutoReconnect();
-      return;
+      try {
+        final printers = await _printerService.getAvailablePrinters();
+
+        if (printers.isEmpty) {
+          _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+          _scheduleNextReconnect();
+          return;
+        }
+
+        final target = printers.first;
+
+        emit(
+          state.copyWith(
+            availablePrinters: printers,
+            selectedPrinter: target,
+            connectionStatus: PrinterConnectionStatus.connecting,
+            isLoading: false,
+          ),
+        );
+
+        _log(
+          'Auto-reconnect (sin selección): intentando conectar a ${target.devicePath}',
+        );
+        final ok = await _printerService.connect(target.devicePath);
+
+        if (!ok) {
+          emit(
+            state.copyWith(
+              connectionStatus: PrinterConnectionStatus.disconnected,
+              isLoading: false,
+            ),
+          );
+          _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+          _scheduleNextReconnect();
+          return;
+        }
+
+        final status = await _printerService.checkStatus();
+
+        emit(
+          state.copyWith(
+            connectionStatus: PrinterConnectionStatus.connected,
+            printerStatus: status,
+            isLoading: false,
+            clearError: true,
+          ),
+        );
+
+        _stopAutoReconnect();
+        add(const StartMonitoringEvent());
+        return;
+      } catch (_) {
+        _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+        _scheduleNextReconnect();
+        return;
+      }
     }
 
     // Evitar solaparse con otra conexión
@@ -447,6 +544,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     ResetPrinterEvent event,
     Emitter<PrinterBlocState> emit,
   ) async {
+    _startupAutoConnectHandled = false;
     add(StopMonitoringEvent());
     _stopAutoReconnect();
     add(DisconnectPrinterEvent());
