@@ -324,10 +324,10 @@ packages:
     dependency: "direct main"
     description:
       name: ti_printer_plugin
-      sha256: "7a8732244a159d485fd19bd19228b214ee475b4eb635db66590e8ca4722f5560"
+      sha256: "830e4f41a391a06a55a7483b0a2e1230e05666ce2dc89718ec3ca132470abd26"
       url: "https://pub.dev"
     source: hosted
-    version: "1.0.6"
+    version: "1.0.7"
   typed_data:
     dependency: transitive
     description:

@@ -9,20 +9,16 @@ import 'printer_state.dart';
 import 'dart:typed_data';
 
 /// BLoC que gestiona el estado y lógica de la impresora
+/// Optimizado para terminales de autoservicio con alta disponibilidad
 class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
   final PrinterService _printerService;
   Timer? _monitoringTimer;
-
-  // Reconexión automática (cuando se apaga/enciende la impresora)
   Timer? _reconnectTimer;
   Timer? _printClearTimer;
 
   int _reconnectAttempt = 0;
   int _noResponseCount = 0;
-
-  // Auto-conexión al iniciar: conectar a la primera impresora disponible
   bool _startupAutoConnectHandled = false;
-  bool _isPrinting = false;
 
   static const Duration _reconnectMinDelay = Duration(milliseconds: 500);
   static const Duration _reconnectMaxDelay = Duration(seconds: 10);
@@ -34,7 +30,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
   PrinterBloc({PrinterService? printerService})
     : _printerService = printerService ?? PrinterService(),
       super(PrinterBlocState.initial()) {
-    // Registrar handlers de eventos
     on<LoadPrintersEvent>(_onLoadPrinters);
     on<SelectPrinterEvent>(_onSelectPrinter);
     on<ConnectPrinterEvent>(_onConnectPrinter);
@@ -49,11 +44,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     on<StatusUpdatedEvent>(_onStatusUpdated);
     on<ClearErrorEvent>(_onClearError);
     on<ResetPrinterEvent>(_onResetPrinter);
-
     on<PrintTicketEvent>(_onPrintTicket);
     on<ClearPrintStatusEvent>(_onClearPrintStatus);
 
-    // Al iniciar, listar impresoras e intentar conectar a la primera disponible
     add(LoadPrintersEvent());
   }
 
@@ -78,10 +71,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           ),
         );
 
-        // ✅ Solo una vez al arranque: empezar a reintentar hasta que aparezca una
         if (!_startupAutoConnectHandled) {
           _startupAutoConnectHandled = true;
-          _startAutoReconnect(); // tu tick ya conecta a la primera si selected == null
+          _startAutoReconnect();
         }
         return;
       }
@@ -107,9 +99,8 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       if (shouldAutoConnect) {
         _startupAutoConnectHandled = true;
         _log('Auto-connect inicio: conectando a ${printers.first.devicePath}');
-        add(ConnectPrinterEvent()); // conecta e inicia monitoreo
+        add(ConnectPrinterEvent());
       } else if (!_startupAutoConnectHandled) {
-        // Consume la bandera igualmente (para que no haga autoconnect en reloads manuales)
         _startupAutoConnectHandled = true;
       }
     } catch (e) {
@@ -120,7 +111,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         ),
       );
 
-      // Si falla al inicio, también podés optar por reintentar (solo una vez)
       if (!_startupAutoConnectHandled) {
         _startupAutoConnectHandled = true;
         _startAutoReconnect();
@@ -169,7 +159,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
 
       if (success) {
         _log('Conexión OK');
-        // Verificar estado inmediatamente después de conectar
         final status = await _printerService.checkStatus();
 
         emit(
@@ -181,7 +170,10 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           ),
         );
 
-        // Iniciar monitoreo automático
+        // Resetear contadores con conexion exitosa
+        _noResponseCount = 0;
+        _reconnectAttempt = 0;
+
         add(const StartMonitoringEvent());
       } else {
         _log('Conexión fallida');
@@ -193,7 +185,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           ),
         );
 
-        // Reintentar automáticamente (útil en inicio o si el puerto estaba en transición)
         _startAutoReconnect();
       }
     } catch (e) {
@@ -213,7 +204,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     DisconnectPrinterEvent event,
     Emitter<PrinterBlocState> emit,
   ) async {
-    // Detener monitoreo y reconexión
     add(StopMonitoringEvent());
     _stopAutoReconnect();
 
@@ -248,12 +238,10 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     if (state.isMonitoring) return;
 
     emit(state.copyWith(isMonitoring: true));
-    _log('Monitoreo iniciado (polling)');
+    _log('Monitoreo iniciado (polling cada ${event.interval.inSeconds}s)');
 
-    // Verificar estado inmediatamente
     add(CheckStatusEvent());
 
-    // Iniciar timer periódico
     _monitoringTimer?.cancel();
     _monitoringTimer = Timer.periodic(event.interval, (timer) {
       if (state.connectionStatus == PrinterConnectionStatus.connected) {
@@ -293,22 +281,22 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     AutoReconnectTickEvent event,
     Emitter<PrinterBlocState> emit,
   ) async {
-    _log('AutoReconnectTick');
-    // Si ya reconectó, cortar
+    _log('AutoReconnectTick (intento ${_reconnectAttempt + 1})');
+
     if (state.connectionStatus == PrinterConnectionStatus.connected) {
       _stopAutoReconnect();
       return;
     }
 
     final selected = state.selectedPrinter;
-    // Si no hay impresora seleccionada (por ejemplo al iniciar),
-    // intentar conectar a la primera disponible cuando aparezca.
+
+    // Sin selección: intentar con la primera disponible
     if (selected == null) {
       try {
         final printers = await _printerService.getAvailablePrinters();
 
         if (printers.isEmpty) {
-          _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+          _reconnectAttempt++;
           _scheduleNextReconnect();
           return;
         }
@@ -324,9 +312,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           ),
         );
 
-        _log(
-          'Auto-reconnect (sin selección): intentando conectar a ${target.devicePath}',
-        );
+        _log('Auto-reconnect: conectando a ${target.devicePath}');
         final ok = await _printerService.connect(target.devicePath);
 
         if (!ok) {
@@ -336,7 +322,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
               isLoading: false,
             ),
           );
-          _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+          _reconnectAttempt++;
           _scheduleNextReconnect();
           return;
         }
@@ -356,13 +342,13 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         add(const StartMonitoringEvent());
         return;
       } catch (_) {
-        _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+        _reconnectAttempt++;
         _scheduleNextReconnect();
         return;
       }
     }
 
-    // Evitar solaparse con otra conexión
+    // Con selección: intentar reconectar al mismo dispositivo
     if (state.connectionStatus == PrinterConnectionStatus.connecting ||
         state.isLoading) {
       _scheduleNextReconnect();
@@ -373,13 +359,14 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       final printers = await _printerService.getAvailablePrinters();
 
       if (printers.isEmpty) {
-        _log('No hay impresoras detectadas (reintentando)');
-        _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+        _log(
+          'No hay impresoras detectadas (reintentando en ${_getNextDelaySeconds()}s)',
+        );
+        _reconnectAttempt++;
         _scheduleNextReconnect();
         return;
       }
 
-      // Preferir el mismo devicePath; si cambió y hay 1 sola impresora, usar esa
       PrinterDevice? target;
       for (final p in printers) {
         if (p.devicePath == selected.devicePath) {
@@ -390,17 +377,16 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       target ??= printers.length == 1 ? printers.first : null;
 
       if (target == null) {
-        // Hay varias impresoras y la seleccionada no está: no adivinar
         emit(
           state.copyWith(
             availablePrinters: printers,
             connectionStatus: PrinterConnectionStatus.disconnected,
             isLoading: false,
             errorMessage:
-                'Impresora desconectada. Se detectaron múltiples impresoras; seleccione una para reconectar.',
+                'Impresora desconectada. Se detectaron múltiples impresoras; seleccione una.',
           ),
         );
-        _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+        _reconnectAttempt++;
         _scheduleNextReconnect();
         return;
       }
@@ -419,21 +405,21 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       final ok = await _printerService.connect(target.devicePath);
 
       if (!ok) {
-        _log('Reconexión fallida');
+        _log('Reconexión fallida (reintentando en ${_getNextDelaySeconds()}s)');
         emit(
           state.copyWith(
             connectionStatus: PrinterConnectionStatus.disconnected,
             isLoading: false,
           ),
         );
-        _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+        _reconnectAttempt++;
         _scheduleNextReconnect();
         return;
       }
 
       final status = await _printerService.checkStatus();
 
-      _log('Reconexión OK');
+      _log('Reconexión exitosa después de ${_reconnectAttempt + 1} intentos');
 
       emit(
         state.copyWith(
@@ -446,8 +432,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
 
       _stopAutoReconnect();
       add(const StartMonitoringEvent());
-    } catch (_) {
-      _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 20);
+    } catch (e) {
+      _log('Error en reconexión: $e (reintentando)');
+      _reconnectAttempt++;
       _scheduleNextReconnect();
     }
   }
@@ -456,11 +443,15 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     PrintTicketEvent event,
     Emitter<PrinterBlocState> emit,
   ) async {
-    // Evitar doble click
-    if (state.printStatus == PrintStatus.printing) return;
+    // 1. Prevenir doble click
+    if (state.printStatus == PrintStatus.printing) {
+      _log('PrintTest: ya hay impresión en curso');
+      return;
+    }
 
-    // Solo si está conectado
+    // 2. Verificar estado inicial
     if (state.connectionStatus != PrinterConnectionStatus.connected) {
+      _log('PrintTest: no conectada');
       emit(
         state.copyWith(
           printStatus: PrintStatus.error,
@@ -477,7 +468,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     _log('PrintTest: iniciando...');
 
     try {
+      // 3. Validar estado (operación async)
       final ready = await validateBeforeCriticalPoint('print_test');
+
       if (!ready) {
         _log('PrintTest: impresora no lista');
         emit(
@@ -490,6 +483,33 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         return;
       }
 
+      // 4. CRÍTICO: Verificar que el estado no cambió durante la operación async
+      if (state.connectionStatus != PrinterConnectionStatus.connected) {
+        _log('PrintTest: desconectada durante validación');
+        emit(
+          state.copyWith(
+            printStatus: PrintStatus.error,
+            printMessage: 'Impresora desconectada durante validación',
+          ),
+        );
+        _scheduleClearPrintChip();
+        return;
+      }
+
+      // 5. Verificar que el servicio sigue conectado
+      if (!_printerService.isConnected) {
+        _log('PrintTest: servicio desconectado');
+        emit(
+          state.copyWith(
+            printStatus: PrintStatus.error,
+            printMessage: 'Conexión perdida',
+          ),
+        );
+        _scheduleClearPrintChip();
+        return;
+      }
+
+      // 6. Todo OK, proceder a imprimir
       final data = _buildSampleTicket();
       final ok = await _printerService.sendRawData(data);
 
@@ -540,7 +560,10 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
   }
 
   void _startAutoReconnect() {
-    if (_reconnectTimer != null) return;
+    if (_reconnectTimer != null) {
+      _log('Auto-reconnect ya está activo');
+      return;
+    }
     _reconnectAttempt = 0;
     _scheduleNextReconnect();
   }
@@ -548,17 +571,27 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
   void _scheduleNextReconnect() {
     _reconnectTimer?.cancel();
 
+    // En autoservicio, SIEMPRE reintenta
     final ms = (_reconnectMinDelay.inMilliseconds * (1 << _reconnectAttempt))
         .clamp(
           _reconnectMinDelay.inMilliseconds,
           _reconnectMaxDelay.inMilliseconds,
         );
 
-    _log('Auto-reconnect en ${ms}ms (intento $_reconnectAttempt)');
+    _log('Auto-reconnect en ${ms ~/ 1000}s (intento ${_reconnectAttempt + 1})');
 
     _reconnectTimer = Timer(Duration(milliseconds: ms), () {
       add(const AutoReconnectTickEvent());
     });
+  }
+
+  int _getNextDelaySeconds() {
+    final ms = (_reconnectMinDelay.inMilliseconds * (1 << _reconnectAttempt))
+        .clamp(
+          _reconnectMinDelay.inMilliseconds,
+          _reconnectMaxDelay.inMilliseconds,
+        );
+    return ms ~/ 1000;
   }
 
   void _stopAutoReconnect() {
@@ -569,7 +602,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
   }
 
   void _markConnectionLost(Emitter<PrinterBlocState> emit) {
-    _log('Conexión perdida -> desconectado y auto-reconnect');
+    _log('Conexión perdida -> desconectado y auto-reconnect indefinido');
     add(StopMonitoringEvent());
 
     emit(
@@ -591,9 +624,9 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     emit(state.copyWith(printerStatus: status, clearError: !status.hasError));
 
     if (!status.hasError || status.errorType == null) {
-      // _log('Estado OK');
+      // Resetear contador cuando la impresora responde OK
       _noResponseCount = 0;
-      // Si reconectó, apagar cualquier loop
+
       if (state.connectionStatus == PrinterConnectionStatus.connected) {
         _stopAutoReconnect();
       }
@@ -603,15 +636,12 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     final errorType = status.errorType!;
     _log('Estado con error: $errorType - ${status.errorMessage}');
 
-    // Caso típico cuando se apaga la impresora:
-    // - el plugin devuelve "no responde" / comunicación fallida o device desaparece.
     if (errorType == PrinterErrorType.deviceNotFound ||
         errorType == PrinterErrorType.communicationError) {
       _markConnectionLost(emit);
       return;
     }
 
-    // Si se repite "no responde" 2 veces seguidas, tratarlo como desconexión
     if (errorType == PrinterErrorType.offline &&
         status.errorMessage == 'Impresora no responde') {
       _noResponseCount++;
@@ -623,7 +653,6 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       _noResponseCount = 0;
     }
 
-    // Otros errores (papel, tapa, etc.)
     _handlePrinterError(errorType, emit);
   }
 
@@ -665,45 +694,20 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     }
   }
 
-  Future<bool> printTestTicket() async {
-    if (_isPrinting) return false;
-    _isPrinting = true;
-
-    try {
-      // Validación final (estado + dispara StatusUpdatedEvent)
-      final isReady = await validateBeforeCriticalPoint('print_test');
-      if (!isReady) return false;
-
-      final data = _buildSampleTicket();
-      final ok = await _printerService.sendRawData(data);
-      return ok;
-    } catch (_) {
-      return false;
-    } finally {
-      _isPrinting = false;
-    }
-  }
-
   Uint8List _buildSampleTicket() {
     final List<int> commands = [];
 
-    // ESC @ - Inicializar impresora
     commands.addAll([0x1B, 0x40]);
-
-    // ESC a 1 - Centrar
     commands.addAll([0x1B, 0x61, 0x01]);
     commands.addAll('IMPRESION DE PRUEBA\n'.codeUnits);
 
-    // Negrita ON
     commands.addAll([0x1B, 0x45, 0x01]);
     commands.addAll('MONITOR PRINTER\n'.codeUnits);
-    // Negrita OFF
     commands.addAll([0x1B, 0x45, 0x00]);
 
     commands.addAll('\n'.codeUnits);
     commands.addAll('--------------------------------\n'.codeUnits);
 
-    // Izquierda
     commands.addAll([0x1B, 0x61, 0x00]);
 
     final now = DateTime.now();
@@ -721,21 +725,15 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     commands.addAll('conexion y el envio OK.\n'.codeUnits);
 
     commands.addAll('\n\n\n'.codeUnits);
-
-    // Corte
     commands.addAll([0x1D, 0x56, 0x42, 0x00]);
 
     return Uint8List.fromList(commands);
   }
 
-  // ==================== MÉTODOS PRIVADOS ====================
-
   void _handlePrinterError(
     PrinterErrorType errorType,
     Emitter<PrinterBlocState> emit,
   ) {
-    // Dejar lugar para lógica específica por tipo de error.
-    // Los casos de desconexión se manejan en _onStatusUpdated.
     if (errorType == PrinterErrorType.deviceNotFound ||
         errorType == PrinterErrorType.communicationError) {
       _markConnectionLost(emit);

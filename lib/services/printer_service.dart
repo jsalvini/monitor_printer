@@ -156,9 +156,12 @@ class PrinterService {
 
   Future<void> _safeCloseUsbPort() async {
     try {
-      //await _plugin.closeUsbPort();
-    } catch (_) {
-      // Ignorar
+      if (_currentDevicePath != null) {
+        await _plugin.closeUsbPort();
+        _log('Puerto USB cerrado');
+      }
+    } catch (e) {
+      _log('Error al cerrar puerto (ignorado): $e');
     }
   }
 

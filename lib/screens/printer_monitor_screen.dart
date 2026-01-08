@@ -422,9 +422,6 @@ class _ActionButtons extends StatelessWidget {
         const SizedBox(width: 12),
         Expanded(
           child: OutlinedButton.icon(
-            /*onPressed: isConnected && !state.isLoading
-                ? () => _printTest(context)
-                : null,*/
             onPressed:
                 isConnected &&
                     !state.isLoading &&
@@ -456,57 +453,6 @@ class _ActionButtons extends StatelessWidget {
       ],
     );
   }
-}
-
-Future<void> _printTest(BuildContext context) async {
-  // Diálogo “Imprimiendo…”
-  showDialog(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => const Center(
-      child: Card(
-        child: Padding(
-          padding: EdgeInsets.all(20),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(strokeWidth: 2),
-              SizedBox(width: 16),
-              Text('Imprimiendo…'),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-
-  final ok = await context.read<PrinterBloc>().printTestTicket();
-
-  if (!context.mounted) return;
-  Navigator.pop(context); // cerrar diálogo
-
-  showDialog(
-    context: context,
-    builder: (_) => AlertDialog(
-      icon: Icon(
-        ok ? Icons.check_circle : Icons.error,
-        color: ok ? Colors.green : Colors.red,
-        size: 48,
-      ),
-      title: Text(ok ? 'Éxito' : 'No se pudo imprimir'),
-      content: Text(
-        ok
-            ? 'Se envió una impresión de prueba a la impresora.'
-            : 'La impresora no está lista. Verificá el estado (papel/tapa/conexión).',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('OK'),
-        ),
-      ],
-    ),
-  );
 }
 
 /// Botón principal para comenzar (simula el inicio de la app)
