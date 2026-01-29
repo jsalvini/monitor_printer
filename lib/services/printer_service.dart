@@ -166,7 +166,11 @@ class PrinterService {
         _log('📊 CONSULTA DE ESTADO (Epson-safe)');
 
         // 1) EOT1
-        final onlineByte = await _readStatusByteWithRetry(_cmdEot1, retries: 2);
+        final onlineByte = await _readStatusByteWithRetry(
+          _cmdEot1,
+          retries: 2,
+          tag: 'EOT1',
+        );
         _log(
           'Online (DLE EOT 1): ${onlineByte == null ? 'null' : '0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
         );
@@ -178,10 +182,12 @@ class PrinterService {
           final offlineByte = await _readStatusByteWithRetry(
             _cmdEot2,
             retries: 1,
+            tag: 'EOT2',
           );
           final paperByte = await _readStatusByteWithRetry(
             _cmdEot4,
             retries: 1,
+            tag: 'EOT4',
           );
 
           _log(
@@ -253,14 +259,22 @@ class PrinterService {
         final isOnline = (onlineByte & 0x08) == 0; // EOT1 bit3 (online/offline)
         _log('   └─ Bit3 Online: ${isOnline ? '✅ Online' : '❌ Offline'}');
 
-        final paperByte = await _readStatusByteWithRetry(_cmdEot4, retries: 1);
+        final paperByte = await _readStatusByteWithRetry(
+          _cmdEot4,
+          retries: 1,
+          tag: 'EOT4',
+        );
         _log(
           'Paper (DLE EOT 4): ${paperByte == null ? 'null' : '0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
         );
 
         int? offlineByte;
         if (!isOnline) {
-          offlineByte = await _readStatusByteWithRetry(_cmdEot2, retries: 1);
+          offlineByte = await _readStatusByteWithRetry(
+            _cmdEot2,
+            retries: 1,
+            tag: 'EOT2',
+          );
           _log(
             'Offline (DLE EOT 2): ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
           );
@@ -496,21 +510,57 @@ class PrinterService {
     Uint8List cmd, {
     int retries = 2,
     Duration retryDelay = const Duration(milliseconds: 120),
+    Duration timeoutPerAttempt = const Duration(milliseconds: 700),
+    String tag = '',
   }) async {
-    // Idea: si la respuesta llegó tarde, el 1er intento puede leer vacío,
-    // pero el 2do consume el byte pendiente del MISMO comando y realinea.
-    for (var i = 0; i <= retries; i++) {
-      final rsp = await _plugin.readStatusUsb(cmd);
-      if (rsp != null && rsp.isNotEmpty) {
-        final b = rsp[0];
-        if (_isValidRealtimeStatusByte(b)) return b;
+    String fmt(int b) =>
+        '0x${b.toRadixString(16).padLeft(2, '0').toUpperCase()}';
 
-        _log(
-          '⚠️ Byte inválido para DLE EOT: 0x${b.toRadixString(16).padLeft(2, '0').toUpperCase()}',
-        );
+    for (var i = 0; i <= retries; i++) {
+      final sw = Stopwatch()..start();
+      _log('➡️  [$tag] intento ${i + 1}/${retries + 1} send+read');
+
+      Uint8List? rsp;
+      try {
+        rsp = await _plugin.readStatusUsb(cmd).timeout(timeoutPerAttempt);
+      } catch (e) {
+        _log('⏱️  [$tag] TIMEOUT/ERROR en ${sw.elapsedMilliseconds}ms: $e');
+        await Future.delayed(retryDelay);
+        continue;
       }
+
+      _log(
+        '⬅️  [$tag] rsp len=${rsp?.length ?? 0} en ${sw.elapsedMilliseconds}ms',
+      );
+
+      if (rsp == null || rsp.isEmpty) {
+        await Future.delayed(retryDelay);
+        continue;
+      }
+
+      // Si vienen varios bytes, loguealos para diagnosticar desalineación
+      if (rsp.length > 1) {
+        final all = rsp.map((b) => fmt(b)).join(', ');
+        _log('🔎 [$tag] rsp bytes: [$all]');
+      }
+
+      // Elegir el ÚLTIMO byte válido (más probable que sea el “nuevo”)
+      for (var idx = rsp.length - 1; idx >= 0; idx--) {
+        final b = rsp[idx];
+        if (_isValidRealtimeStatusByte(b)) {
+          _log('✅ [$tag] byte válido elegido: ${fmt(b)} (idx=$idx)');
+          return b;
+        }
+      }
+
+      // Ninguno válido
+      final all = rsp.map((b) => fmt(b)).join(', ');
+      _log('⚠️  [$tag] Ningún byte válido. Recibido: [$all]');
+
       await Future.delayed(retryDelay);
     }
+
+    _log('❌ [$tag] sin respuesta válida tras ${retries + 1} intentos');
     return null;
   }
 
@@ -530,47 +580,57 @@ class PrinterService {
       '   Offline: ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(offlineByte)}'}',
     );
 
-    // EOT1 - bit3: 0 Online, 1 Offline :contentReference[oaicite:6]{index=6}
+    // EOT1 bit3: 0 Online / 1 Offline :contentReference[oaicite:3]{index=3}
     final isOnline = (onlineByte & 0x08) == 0;
 
-    // EOT4 - Roll paper sensor:
-    // Para paper-out: bits 5 y 6 = 11 => sin papel (muy típico Epson) :contentReference[oaicite:7]{index=7}
-    bool hasPaper = true;
+    // Papel (EOT4 bits 5&6 == 11 => paper not present) :contentReference[oaicite:4]{index=4}
+    bool? hasPaper;
     if (paperByte != null) {
-      final bit5 = (paperByte & 0x20) != 0;
-      final bit6 = (paperByte & 0x40) != 0;
-      hasPaper = !(bit5 && bit6);
+      final paperOut = (paperByte & 0x60) == 0x60;
+      hasPaper = !paperOut;
     }
 
-    // EOT2 - Offline cause:
-    // bit2: Cover open :contentReference[oaicite:8]{index=8}
-    // bit6: Error occurred :contentReference[oaicite:9]{index=9}
-    bool isCoverOpen = false;
-    bool hasOfflineError = false;
+    // Tapa/Error (EOT2 bit2 cover open, bit6 error occurred) :contentReference[oaicite:5]{index=5}
+    bool? isCoverOpen;
+    bool? hasOfflineError;
 
-    // IMPORTANTÍSIMO: sólo confiamos en EOT2 si la impresora estaba Offline cuando lo pedimos
-    if (!isOnline && offlineByte != null) {
-      isCoverOpen = (offlineByte & 0x04) != 0;
-      hasOfflineError = (offlineByte & 0x40) != 0;
+    if (!isOnline) {
+      if (offlineByte != null) {
+        isCoverOpen = (offlineByte & 0x04) != 0;
+        hasOfflineError = (offlineByte & 0x40) != 0;
+      } else {
+        isCoverOpen = null; // UNKNOWN (clave para tu caso)
+        hasOfflineError = null; // UNKNOWN
+      }
+    } else {
+      // si está online, no afirmamos nada sobre tapa basado en EOT2
+      isCoverOpen = false;
+      hasOfflineError = false;
     }
 
     _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     _log('📊 ESTADO FINAL:');
     _log('   Online: ${isOnline ? '✅' : '❌'}');
-    _log('   Papel:  ${hasPaper ? '✅' : '❌'}');
-    _log('   Tapa:   ${isCoverOpen ? '❌ Abierta' : '✅ Cerrada'}');
-    _log('   Error:  ${hasOfflineError ? '❌' : '✅'}');
+    _log(
+      '   Papel:  ${hasPaper == null ? '❔ Unknown' : (hasPaper ? '✅' : '❌')}',
+    );
+    _log(
+      '   Tapa:   ${isCoverOpen == null ? '❔ Unknown' : (isCoverOpen ? '❌ Abierta' : '✅ Cerrada')}',
+    );
+    _log(
+      '   Error:  ${hasOfflineError == null ? '❔ Unknown' : (hasOfflineError ? '❌' : '✅')}',
+    );
     _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-    // Prioridad UX (bloqueantes)
-    if (isCoverOpen) {
+    // Prioridades UX (bloqueantes)
+    if (isCoverOpen == true) {
       return PrinterStatus.withError(
         PrinterErrorType.coverOpen,
         'La tapa de la impresora está abierta',
       );
     }
 
-    if (!hasPaper) {
+    if (hasPaper == false) {
       return PrinterStatus.withError(
         PrinterErrorType.paperOut,
         'Sin papel en la impresora',
@@ -578,15 +638,30 @@ class PrinterService {
     }
 
     if (!isOnline) {
-      if (hasOfflineError) {
+      // Offline pero sin detalle (esto es tu TM-T20IIIL típico si no responde EOT2)
+      if (hasOfflineError == true) {
         return PrinterStatus.withError(
           PrinterErrorType.communicationError,
           'Error de impresora (offline)',
         );
       }
+      if (isCoverOpen == null || hasOfflineError == null || hasPaper == null) {
+        return PrinterStatus.withError(
+          PrinterErrorType.offline,
+          'Impresora offline (lectura incompleta). Posible tapa abierta o condición BUSY.',
+        );
+      }
       return PrinterStatus.withError(
         PrinterErrorType.offline,
         'Impresora fuera de línea',
+      );
+    }
+
+    // Online: si no pudimos leer papel, marcá “inestable” (tu decisión UX)
+    if (hasPaper == null) {
+      return PrinterStatus.withError(
+        PrinterErrorType.communicationError,
+        'Lectura inestable (sin respuesta a sensor de papel)',
       );
     }
 
