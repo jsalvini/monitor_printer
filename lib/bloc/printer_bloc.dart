@@ -468,8 +468,8 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
     _log('PrintTest: iniciando...');
 
     try {
-      // 3. Validar estado (operación async)
-      final ready = await validateBeforeCriticalPoint('print_test');
+      // 3. Validar estado
+      final ready = await validateBeforeCriticalPoint('print');
 
       if (!ready) {
         _log('PrintTest: impresora no lista');
@@ -498,7 +498,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
 
       // 5. Verificar que el servicio sigue conectado
       if (!_printerService.isConnected) {
-        _log('PrintTest: servicio desconectado');
+        _log('Print: servicio desconectado');
         emit(
           state.copyWith(
             printStatus: PrintStatus.error,
@@ -514,7 +514,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
       final ok = await _printerService.sendRawData(data);
 
       if (ok) {
-        _log('PrintTest: OK');
+        _log('Print: OK');
         emit(
           state.copyWith(
             printStatus: PrintStatus.success,
@@ -522,7 +522,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
           ),
         );
       } else {
-        _log('PrintTest: FAIL (sendRawData false)');
+        _log('Print: FAIL (sendRawData false)');
         emit(
           state.copyWith(
             printStatus: PrintStatus.error,
@@ -531,7 +531,7 @@ class PrinterBloc extends Bloc<PrinterEvent, PrinterBlocState> {
         );
       }
     } catch (e) {
-      _log('PrintTest: exception $e');
+      _log('Print: exception $e');
       emit(
         state.copyWith(
           printStatus: PrintStatus.error,

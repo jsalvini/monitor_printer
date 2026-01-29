@@ -14,6 +14,9 @@ class PrinterBlocState extends Equatable {
   final bool isLoading;
   final PrintStatus printStatus;
   final String? printMessage;
+  final int? currentVoucherIndex; // 1..N
+  final int? totalVouchers; // N
+  final String? currentVoucherType;
 
   const PrinterBlocState({
     this.availablePrinters = const [],
@@ -25,6 +28,9 @@ class PrinterBlocState extends Equatable {
     this.isLoading = false,
     this.printStatus = PrintStatus.idle,
     this.printMessage,
+    this.currentVoucherIndex,
+    this.totalVouchers,
+    this.currentVoucherType,
   });
 
   /// Estado inicial
@@ -64,6 +70,9 @@ class PrinterBlocState extends Equatable {
     String? printMessage,
     bool clearError = false,
     bool clearPrintMessage = false,
+    int? currentVoucherIndex,
+    int? totalVouchers,
+    String? currentVoucherType,
   }) {
     return PrinterBlocState(
       availablePrinters: availablePrinters ?? this.availablePrinters,
@@ -77,6 +86,9 @@ class PrinterBlocState extends Equatable {
       printMessage: clearPrintMessage
           ? null
           : (printMessage ?? this.printMessage),
+      currentVoucherIndex: currentVoucherIndex ?? this.currentVoucherIndex,
+      totalVouchers: totalVouchers ?? this.totalVouchers,
+      currentVoucherType: currentVoucherType ?? this.currentVoucherType,
     );
   }
 
@@ -91,5 +103,8 @@ class PrinterBlocState extends Equatable {
     isLoading,
     printStatus,
     printMessage,
+    currentVoucherIndex,
+    totalVouchers,
+    currentVoucherType,
   ];
 }

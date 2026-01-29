@@ -28,7 +28,7 @@ class PrinterMonitorScreen extends StatelessWidget {
 
   bool _shouldShowReconnectChip(PrinterBlocState state) {
     // Se muestra cuando la desconexión fue por pérdida del dispositivo/comunicación
-    // y hay una impresora seleccionada (por lo tanto el sistema intentará reconectar).
+    // y si hay una impresora seleccionada el sistema intentará reconectar.
     if (!_isDisconnectError(state)) return false;
     if (state.selectedPrinter == null) return false;
 
@@ -101,11 +101,11 @@ class PrinterMonitorScreen extends StatelessWidget {
           final prevMsg = previous.displayErrorMessage;
           final currMsg = current.displayErrorMessage;
 
-          // Solo reaccionar cuando el mensaje cambia (evita SnackBars repetidos por el polling)
+          // Solo reaccionar cuando el mensaje cambia.
           if (currMsg == null) return false;
           if (prevMsg == currMsg) return false;
 
-          // La desconexión se muestra de forma persistente en pantalla, no como SnackBar
+          // La desconexión se muestra en pantalla.
           return !_isDisconnectError(current);
         },
         listener: (context, state) {
