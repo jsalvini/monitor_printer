@@ -30,6 +30,20 @@ class PrinterService {
     0x04,
   ]); // Roll paper sensor
 
+  Future<void> _usbQueue = Future.value();
+
+  Future<T> _withUsbLock<T>(Future<T> Function() action) {
+    final c = Completer<T>();
+    _usbQueue = _usbQueue.then((_) async {
+      try {
+        c.complete(await action());
+      } catch (e, st) {
+        c.completeError(e, st);
+      }
+    });
+    return c.future;
+  }
+
   void _log(String message) {
     // Usar print() en lugar de dev.log() para que aparezca en release
     if (kDebugMode) {
@@ -124,29 +138,134 @@ class PrinterService {
   }
 
   /// Lee el estado completo de la impresora
-  Future<PrinterStatus> checkStatus() async {
-    final devicePath = _currentDevicePath;
-    if (devicePath == null) {
-      return PrinterStatus.withError(
-        PrinterErrorType.deviceNotFound,
-        'No hay impresora conectada',
-      );
-    }
+  Future<PrinterStatus> checkStatus() {
+    return _withUsbLock(() async {
+      final devicePath = _currentDevicePath;
+      if (devicePath == null) {
+        return PrinterStatus.withError(
+          PrinterErrorType.deviceNotFound,
+          'No hay impresora conectada',
+        );
+      }
 
-    try {
-      _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      _log('📊 CONSULTA DE ESTADO (Epson-safe)');
+      try {
+        _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        _log('📊 CONSULTA DE ESTADO (Epson-safe)');
 
-      // 1) EOT1 - Printer status
-      final onlineByte = await _readStatusByteWithRetry(_cmdEot1);
-      _log(
-        'Online (DLE EOT 1): ${onlineByte == null ? 'null' : '0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
-      );
+        // 1) EOT1
+        final onlineByte = await _readStatusByteWithRetry(_cmdEot1, retries: 2);
+        _log(
+          'Online (DLE EOT 1): ${onlineByte == null ? 'null' : '0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+        );
 
-      if (onlineByte == null) {
+        // Fallback: si NO responde EOT1, probá EOT2/EOT4 antes de decidir desconectado.
+        if (onlineByte == null) {
+          _log('⚠️ EOT1 sin respuesta → probando EOT2/EOT4 para deducir causa');
+
+          final offlineByte = await _readStatusByteWithRetry(
+            _cmdEot2,
+            retries: 1,
+          );
+          final paperByte = await _readStatusByteWithRetry(
+            _cmdEot4,
+            retries: 1,
+          );
+
+          _log(
+            'Offline (DLE EOT 2): ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+          );
+          _log(
+            'Paper   (DLE EOT 4): ${paperByte == null ? 'null' : '0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+          );
+
+          // Si EOT2 llegó, podés detectar tapa/error aunque EOT1 no haya respondido
+          if (offlineByte != null) {
+            final coverOpen =
+                (offlineByte & 0x04) != 0; // EOT2 bit2 (cover open)
+            final err = (offlineByte & 0x40) != 0; // EOT2 bit6 (error occurred)
+            final paperEndStop =
+                (offlineByte & 0x20) != 0; // EOT2 bit5 (paper-end stop)
+
+            if (coverOpen) {
+              return PrinterStatus.withError(
+                PrinterErrorType.coverOpen,
+                'La tapa de la impresora está abierta',
+              );
+            }
+            if (err) {
+              return PrinterStatus.withError(
+                PrinterErrorType.communicationError,
+                'Error de impresora (offline)',
+              );
+            }
+            if (paperEndStop) {
+              return PrinterStatus.withError(
+                PrinterErrorType.paperOut,
+                'Impresora detenida por fin de papel',
+              );
+            }
+          }
+
+          // Si EOT4 llegó, podés detectar paper-out
+          if (paperByte != null) {
+            final paperOut = (paperByte & 0x60) == 0x60; // EOT4 bits 5&6 == 11
+            if (paperOut) {
+              return PrinterStatus.withError(
+                PrinterErrorType.paperOut,
+                'Sin papel en la impresora',
+              );
+            }
+          }
+
+          // Si nada respondió: distinguir offline “sin respuesta” vs desconectado real
+          final present = await _isDevicePresent(devicePath);
+          if (!present) {
+            _log('❌ Dispositivo no presente -> desconectado');
+            await _safeCloseUsbPort();
+            _currentDevicePath = null;
+            return PrinterStatus.withError(
+              PrinterErrorType.deviceNotFound,
+              'Impresora desconectada',
+            );
+          }
+
+          // Está presente, pero no responde (típico cuando tapa abierta / busy condition)
+          return PrinterStatus.withError(
+            PrinterErrorType.offline,
+            'Impresora offline (sin respuesta a estado). Verificá tapa/papel.',
+          );
+        }
+
+        // EOT1 respondió → seguimos normal
+        final isOnline = (onlineByte & 0x08) == 0; // EOT1 bit3 (online/offline)
+        _log('   └─ Bit3 Online: ${isOnline ? '✅ Online' : '❌ Offline'}');
+
+        final paperByte = await _readStatusByteWithRetry(_cmdEot4, retries: 1);
+        _log(
+          'Paper (DLE EOT 4): ${paperByte == null ? 'null' : '0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+        );
+
+        int? offlineByte;
+        if (!isOnline) {
+          offlineByte = await _readStatusByteWithRetry(_cmdEot2, retries: 1);
+          _log(
+            'Offline (DLE EOT 2): ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+          );
+        } else {
+          _log('Offline (DLE EOT 2): (omitido porque está Online)');
+        }
+
+        _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+        return _interpretBytes(
+          onlineByte: onlineByte,
+          paperByte: paperByte,
+          offlineByte: offlineByte,
+        );
+      } catch (e) {
         final present = await _isDevicePresent(devicePath);
         if (!present) {
-          _log('❌ Dispositivo no presente -> desconectado');
+          _log('❌ Exception + device ausente -> desconectado ($e)');
           await _safeCloseUsbPort();
           _currentDevicePath = null;
           return PrinterStatus.withError(
@@ -155,59 +274,13 @@ class PrinterService {
           );
         }
 
+        _log('❌ Error de comunicación: $e');
         return PrinterStatus.withError(
-          PrinterErrorType.offline,
-          'Impresora no responde',
+          PrinterErrorType.communicationError,
+          'Error de comunicación con impresora: $e',
         );
       }
-
-      final isOnline =
-          (onlineByte & 0x08) ==
-          0; // bit3: 0 Online / 1 Offline :contentReference[oaicite:3]{index=3}
-      _log('   └─ Bit3 Online: ${isOnline ? '✅ Online' : '❌ Offline'}');
-
-      // 2) EOT4 - Roll paper sensor (papel)
-      final paperByte = await _readStatusByteWithRetry(_cmdEot4);
-      _log(
-        'Paper (DLE EOT 4): ${paperByte == null ? 'null' : '0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
-      );
-
-      // 3) EOT2 - Offline cause SOLO si está Offline
-      int? offlineByte;
-      if (!isOnline) {
-        offlineByte = await _readStatusByteWithRetry(_cmdEot2);
-        _log(
-          'Offline (DLE EOT 2): ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
-        );
-      } else {
-        _log('Offline (DLE EOT 2): (omitido porque está Online)');
-      }
-
-      _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-      return _interpretBytes(
-        onlineByte: onlineByte,
-        paperByte: paperByte,
-        offlineByte: offlineByte,
-      );
-    } catch (e) {
-      final present = await _isDevicePresent(devicePath);
-      if (!present) {
-        _log('❌ Exception + device ausente -> desconectado ($e)');
-        await _safeCloseUsbPort();
-        _currentDevicePath = null;
-        return PrinterStatus.withError(
-          PrinterErrorType.deviceNotFound,
-          'Impresora desconectada',
-        );
-      }
-
-      _log('❌ Error de comunicación: $e');
-      return PrinterStatus.withError(
-        PrinterErrorType.communicationError,
-        'Error de comunicación con impresora: $e',
-      );
-    }
+    });
   }
 
   /// Envía datos crudos a la impresora
@@ -437,10 +510,10 @@ class PrinterService {
       '   Online:  0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(onlineByte)}',
     );
     _log(
-      '   Paper:   ${paperByte == null ? 'null' : '0x${paperByte!.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(paperByte!)}'}',
+      '   Paper:   ${paperByte == null ? 'null' : '0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(paperByte)}'}',
     );
     _log(
-      '   Offline: ${offlineByte == null ? 'null' : '0x${offlineByte!.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(offlineByte!)}'}',
+      '   Offline: ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(offlineByte)}'}',
     );
 
     // EOT1 - bit3: 0 Online, 1 Offline :contentReference[oaicite:6]{index=6}
