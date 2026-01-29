@@ -9,6 +9,8 @@ class PrinterService {
   final TiPrinterPlugin _plugin;
   String? _currentDevicePath;
 
+  bool _isEpsonPrinter = false;
+
   PrinterService() : _plugin = TiPrinterPlugin();
 
   void _log(String message) {
@@ -41,18 +43,49 @@ class PrinterService {
       // Cerrar cualquier conexión previa (por si quedó un handle viejo)
       await _safeCloseUsbPort();
       _currentDevicePath = null;
+      _isEpsonPrinter = false;
 
       final success = await _plugin.openUsbPort(devicePath);
       _log('openUsbPort -> $success');
 
       if (success == true) {
         _currentDevicePath = devicePath;
+
+        // Detectar si es impresora EPSON
+        await _detectPrinterType();
         return true;
       }
 
       return false;
     } catch (e) {
       throw PrinterServiceException('Error al conectar con impresora: $e');
+    }
+  }
+
+  /// Detecta el tipo de impresora conectada
+  Future<void> _detectPrinterType() async {
+    try {
+      // Intentar obtener ID de impresora (GS I 1)
+      final printerIdCmd = Uint8List.fromList([0x1D, 0x49, 0x01]);
+
+      // Dar un pequeño delay después de conectar
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      final response = await _plugin.readStatusUsb(printerIdCmd);
+
+      if (response != null && response.isNotEmpty) {
+        final modelId = String.fromCharCodes(response);
+        _log('Modelo detectado: $modelId');
+
+        // Detectar si es EPSON (típicamente responde con "TM-" o contiene "EPSON")
+        if (modelId.contains('TM-') || modelId.contains('EPSON')) {
+          _isEpsonPrinter = true;
+          _log('Impresora EPSON detectada - Usando modo compatible');
+        }
+      }
+    } catch (e) {
+      _log('No se pudo detectar tipo de impresora (usando modo genérico): $e');
+      // En caso de error, asumir modo genérico
     }
   }
 
@@ -66,6 +99,7 @@ class PrinterService {
       _log('disconnect error (ignorado): $e');
     } finally {
       _currentDevicePath = null;
+      _isEpsonPrinter = false;
     }
   }
 
@@ -80,6 +114,10 @@ class PrinterService {
     }
 
     try {
+      final commandDelay = _isEpsonPrinter
+          ? const Duration(milliseconds: 100)
+          : const Duration(milliseconds: 50);
+
       // DLE EOT 1 - Estado online
       final onlineCmd = Uint8List.fromList([0x10, 0x04, 0x01]);
       final onlineResponse = await _plugin.readStatusUsb(onlineCmd);
@@ -103,9 +141,13 @@ class PrinterService {
         );
       }
 
+      await Future.delayed(commandDelay);
+
       // DLE EOT 4 - Estado del papel
       final paperCmd = Uint8List.fromList([0x10, 0x04, 0x04]);
       final paperResponse = await _plugin.readStatusUsb(paperCmd);
+
+      await Future.delayed(commandDelay);
 
       // DLE EOT 2 - Causa de offline
       final offlineCmd = Uint8List.fromList([0x10, 0x04, 0x02]);
@@ -213,10 +255,37 @@ class PrinterService {
         ? offlineResponse[0]
         : 0x00;
 
-    // Interpretar bits según especificación ESC/POS
-    final isOnline = (onlineByte & 0x08) == 0; // Bit 3: 0=online, 1=offline
-    final hasPaper = (paperByte & 0x60) != 0x60; // Bits 5-6: papel presente
-    final isCoverOpen = (offlineByte & 0x04) != 0; // Bit 2: tapa abierta
+    _log(
+      'Bytes de estado: online=0x${onlineByte.toRadixString(16)}, '
+      'paper=0x${paperByte.toRadixString(16)}, '
+      'offline=0x${offlineByte.toRadixString(16)}',
+    );
+
+    bool isOnline;
+    bool hasPaper;
+    bool isCoverOpen;
+
+    if (_isEpsonPrinter) {
+      // Interpretación EPSON (según documentación oficial)
+      // DLE EOT 1: Bit 3 -> 0=online, 1=offline
+      isOnline = (onlineByte & 0x08) == 0;
+
+      // DLE EOT 4: Bits 5,6 -> 11=sin papel, otros valores=con papel
+      // Algunos modelos EPSON: 0x00 = papel OK, 0x60 = sin papel
+      hasPaper = (paperByte & 0x60) != 0x60;
+
+      // DLE EOT 2: Bit 2 -> 1=tapa abierta
+      isCoverOpen = (offlineByte & 0x04) != 0;
+    } else {
+      // Interpretación genérica (como estaba antes)
+      isOnline = (onlineByte & 0x08) == 0;
+      hasPaper = (paperByte & 0x60) != 0x60;
+      isCoverOpen = (offlineByte & 0x04) != 0;
+    }
+
+    _log(
+      'Estado interpretado: online=$isOnline, paper=$hasPaper, cover=$isCoverOpen',
+    );
 
     // Detectar error específico
     if (isCoverOpen) {
