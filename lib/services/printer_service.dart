@@ -13,6 +13,23 @@ class PrinterService {
 
   PrinterService() : _plugin = TiPrinterPlugin();
 
+  // Comandos DLE EOT
+  static final Uint8List _cmdEot1 = Uint8List.fromList([
+    0x10,
+    0x04,
+    0x01,
+  ]); // Printer status
+  static final Uint8List _cmdEot2 = Uint8List.fromList([
+    0x10,
+    0x04,
+    0x02,
+  ]); // Offline cause
+  static final Uint8List _cmdEot4 = Uint8List.fromList([
+    0x10,
+    0x04,
+    0x04,
+  ]); // Roll paper sensor
+
   void _log(String message) {
     // Usar print() en lugar de dev.log() para que aparezca en release
     if (kDebugMode) {
@@ -117,18 +134,16 @@ class PrinterService {
     }
 
     try {
-      // CRÍTICO: Delay entre comandos para EPSON
-      final delay = const Duration(milliseconds: 100);
-
-      // DLE EOT 1 - Estado online
-      final onlineCmd = Uint8List.fromList([0x10, 0x04, 0x01]);
-      final onlineResponse = await _plugin.readStatusUsb(onlineCmd);
-
       _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      _log('📊 RESPUESTAS DE ESTADO:');
-      _log('Online (DLE EOT 1): ${_formatBytes(onlineResponse)}');
+      _log('📊 CONSULTA DE ESTADO (Epson-safe)');
 
-      if (onlineResponse == null || onlineResponse.isEmpty) {
+      // 1) EOT1 - Printer status
+      final onlineByte = await _readStatusByteWithRetry(_cmdEot1);
+      _log(
+        'Online (DLE EOT 1): ${onlineByte == null ? 'null' : '0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+      );
+
+      if (onlineByte == null) {
         final present = await _isDevicePresent(devicePath);
         if (!present) {
           _log('❌ Dispositivo no presente -> desconectado');
@@ -140,31 +155,41 @@ class PrinterService {
           );
         }
 
-        _log('⚠️ Sin respuesta online');
         return PrinterStatus.withError(
           PrinterErrorType.offline,
           'Impresora no responde',
         );
       }
 
-      // DELAY CRÍTICO
-      await Future.delayed(delay);
+      final isOnline =
+          (onlineByte & 0x08) ==
+          0; // bit3: 0 Online / 1 Offline :contentReference[oaicite:3]{index=3}
+      _log('   └─ Bit3 Online: ${isOnline ? '✅ Online' : '❌ Offline'}');
 
-      // DLE EOT 4 - Estado del papel
-      final paperCmd = Uint8List.fromList([0x10, 0x04, 0x04]);
-      final paperResponse = await _plugin.readStatusUsb(paperCmd);
-      _log('Paper (DLE EOT 4): ${_formatBytes(paperResponse)}');
+      // 2) EOT4 - Roll paper sensor (papel)
+      final paperByte = await _readStatusByteWithRetry(_cmdEot4);
+      _log(
+        'Paper (DLE EOT 4): ${paperByte == null ? 'null' : '0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+      );
 
-      // DELAY CRÍTICO
-      await Future.delayed(delay);
+      // 3) EOT2 - Offline cause SOLO si está Offline
+      int? offlineByte;
+      if (!isOnline) {
+        offlineByte = await _readStatusByteWithRetry(_cmdEot2);
+        _log(
+          'Offline (DLE EOT 2): ${offlineByte == null ? 'null' : '0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'}',
+        );
+      } else {
+        _log('Offline (DLE EOT 2): (omitido porque está Online)');
+      }
 
-      // DLE EOT 2 - Causa de offline
-      final offlineCmd = Uint8List.fromList([0x10, 0x04, 0x02]);
-      final offlineResponse = await _plugin.readStatusUsb(offlineCmd);
-      _log('Offline (DLE EOT 2): ${_formatBytes(offlineResponse)}');
       _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-      return _interpretStatus(onlineResponse, paperResponse, offlineResponse);
+      return _interpretBytes(
+        onlineByte: onlineByte,
+        paperByte: paperByte,
+        offlineByte: offlineByte,
+      );
     } catch (e) {
       final present = await _isDevicePresent(devicePath);
       if (!present) {
@@ -244,6 +269,11 @@ class PrinterService {
       return 'Puerto ACM$acmNum';
     }
     return devicePath.split('/').last.toUpperCase();
+  }
+
+  String _toBinaryString(int value) {
+    final s = value.toRadixString(2).padLeft(8, '0');
+    return '${s.substring(0, 4)} ${s.substring(4, 8)}';
   }
 
   PrinterStatus _interpretStatus(
@@ -369,8 +399,117 @@ class PrinterService {
     );
   }
 
-  String _toBinaryString(int byte) {
-    return byte.toRadixString(2).padLeft(8, '0');
+  bool _isValidRealtimeStatusByte(int b) {
+    // Epson: cada status es 0xx1xx10b y se diferencia por bits 0,1,4,7 :contentReference[oaicite:2]{index=2}
+    // bits fijos esperados: bit0=0, bit1=1, bit4=1, bit7=0 => máscara 0x93 debe dar 0x12
+    return (b & 0x93) == 0x12;
+  }
+
+  Future<int?> _readStatusByteWithRetry(
+    Uint8List cmd, {
+    int retries = 2,
+    Duration retryDelay = const Duration(milliseconds: 120),
+  }) async {
+    // Idea: si la respuesta llegó tarde, el 1er intento puede leer vacío,
+    // pero el 2do consume el byte pendiente del MISMO comando y realinea.
+    for (var i = 0; i <= retries; i++) {
+      final rsp = await _plugin.readStatusUsb(cmd);
+      if (rsp != null && rsp.isNotEmpty) {
+        final b = rsp[0];
+        if (_isValidRealtimeStatusByte(b)) return b;
+
+        _log(
+          '⚠️ Byte inválido para DLE EOT: 0x${b.toRadixString(16).padLeft(2, '0').toUpperCase()}',
+        );
+      }
+      await Future.delayed(retryDelay);
+    }
+    return null;
+  }
+
+  PrinterStatus _interpretBytes({
+    required int onlineByte,
+    required int? paperByte,
+    required int? offlineByte,
+  }) {
+    _log('📋 BYTES (raw):');
+    _log(
+      '   Online:  0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(onlineByte)}',
+    );
+    _log(
+      '   Paper:   ${paperByte == null ? 'null' : '0x${paperByte!.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(paperByte!)}'}',
+    );
+    _log(
+      '   Offline: ${offlineByte == null ? 'null' : '0x${offlineByte!.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(offlineByte!)}'}',
+    );
+
+    // EOT1 - bit3: 0 Online, 1 Offline :contentReference[oaicite:6]{index=6}
+    final isOnline = (onlineByte & 0x08) == 0;
+
+    // EOT4 - Roll paper sensor:
+    // Para paper-out: bits 5 y 6 = 11 => sin papel (muy típico Epson) :contentReference[oaicite:7]{index=7}
+    bool hasPaper = true;
+    if (paperByte != null) {
+      final bit5 = (paperByte & 0x20) != 0;
+      final bit6 = (paperByte & 0x40) != 0;
+      hasPaper = !(bit5 && bit6);
+    }
+
+    // EOT2 - Offline cause:
+    // bit2: Cover open :contentReference[oaicite:8]{index=8}
+    // bit6: Error occurred :contentReference[oaicite:9]{index=9}
+    bool isCoverOpen = false;
+    bool hasOfflineError = false;
+
+    // IMPORTANTÍSIMO: sólo confiamos en EOT2 si la impresora estaba Offline cuando lo pedimos
+    if (!isOnline && offlineByte != null) {
+      isCoverOpen = (offlineByte & 0x04) != 0;
+      hasOfflineError = (offlineByte & 0x40) != 0;
+    }
+
+    _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    _log('📊 ESTADO FINAL:');
+    _log('   Online: ${isOnline ? '✅' : '❌'}');
+    _log('   Papel:  ${hasPaper ? '✅' : '❌'}');
+    _log('   Tapa:   ${isCoverOpen ? '❌ Abierta' : '✅ Cerrada'}');
+    _log('   Error:  ${hasOfflineError ? '❌' : '✅'}');
+    _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // Prioridad UX (bloqueantes)
+    if (isCoverOpen) {
+      return PrinterStatus.withError(
+        PrinterErrorType.coverOpen,
+        'La tapa de la impresora está abierta',
+      );
+    }
+
+    if (!hasPaper) {
+      return PrinterStatus.withError(
+        PrinterErrorType.paperOut,
+        'Sin papel en la impresora',
+      );
+    }
+
+    if (!isOnline) {
+      if (hasOfflineError) {
+        return PrinterStatus.withError(
+          PrinterErrorType.communicationError,
+          'Error de impresora (offline)',
+        );
+      }
+      return PrinterStatus.withError(
+        PrinterErrorType.offline,
+        'Impresora fuera de línea',
+      );
+    }
+
+    return PrinterStatus(
+      isOnline: true,
+      hasPaper: true,
+      isCoverOpen: false,
+      hasError: false,
+      lastChecked: DateTime.now(),
+    );
   }
 }
 
