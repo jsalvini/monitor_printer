@@ -30,6 +30,10 @@ class PrinterService {
     0x04,
   ]); // Roll paper sensor
 
+  final Stopwatch _sinceStart = Stopwatch()..start();
+  int _logSeq = 0;
+  int _checkSeq = 0;
+
   Future<void> _usbQueue = Future.value();
 
   Future<T> _withUsbLock<T>(Future<T> Function() action) {
@@ -45,11 +49,16 @@ class PrinterService {
   }
 
   void _log(String message) {
+    final now = DateTime.now().toIso8601String(); // incluye ms y zona
+    final ms = _sinceStart.elapsedMilliseconds.toString().padLeft(7, '0');
     // Usar print() en lugar de dev.log() para que aparezca en release
     if (kDebugMode) {
-      print('🖨️ [PrinterService] $message');
+      print('🖨️ [$now|+$ms ms|#${_logSeq++}] [PrinterService] $message');
     }
-    dev.log('🖨️ $message', name: 'PrinterService');
+    dev.log(
+      '🖨️ [$now|+$ms ms|#${_logSeq++}] $message',
+      name: 'PrinterService',
+    );
   }
 
   /// Obtiene lista de impresoras USB disponibles
@@ -141,6 +150,10 @@ class PrinterService {
   Future<PrinterStatus> checkStatus() {
     return _withUsbLock(() async {
       final devicePath = _currentDevicePath;
+
+      final callId = ++_checkSeq;
+      final sw = Stopwatch()..start();
+
       if (devicePath == null) {
         return PrinterStatus.withError(
           PrinterErrorType.deviceNotFound,
@@ -255,8 +268,6 @@ class PrinterService {
           _log('Offline (DLE EOT 2): (omitido porque está Online)');
         }
 
-        _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
         return _interpretBytes(
           onlineByte: onlineByte,
           paperByte: paperByte,
@@ -279,6 +290,9 @@ class PrinterService {
           PrinterErrorType.communicationError,
           'Error de comunicación con impresora: $e',
         );
+      } finally {
+        _log('📊 [#$callId] FIN checkStatus() ${sw.elapsedMilliseconds}ms');
+        _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       }
     });
   }
