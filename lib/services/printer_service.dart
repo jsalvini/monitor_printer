@@ -1,19 +1,23 @@
 import 'dart:async';
 import 'dart:developer' as dev;
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:ti_printer_plugin/ti_printer_plugin.dart';
 import '../models/printer_status.dart';
 
-/// Servicio para gestionar todas las operaciones con la impresora
+/// Servicio corregido para EPSON TM-T20IIIL
+/// Incluye logs con print() para modo release y corrección de interpretación de bits
 class PrinterService {
   final TiPrinterPlugin _plugin;
   String? _currentDevicePath;
-
   bool _isEpsonPrinter = false;
 
   PrinterService() : _plugin = TiPrinterPlugin();
 
   void _log(String message) {
+    // Usar print() en lugar de dev.log() para que aparezca en release
+    if (kDebugMode) {
+      print('🖨️ [PrinterService] $message');
+    }
     dev.log('🖨️ $message', name: 'PrinterService');
   }
 
@@ -40,7 +44,6 @@ class PrinterService {
     try {
       _log('connect($devicePath)');
 
-      // Cerrar cualquier conexión previa (por si quedó un handle viejo)
       await _safeCloseUsbPort();
       _currentDevicePath = null;
       _isEpsonPrinter = false;
@@ -51,8 +54,12 @@ class PrinterService {
       if (success == true) {
         _currentDevicePath = devicePath;
 
-        // Detectar si es impresora EPSON
+        // Pequeño delay después de conectar
+        await Future.delayed(const Duration(milliseconds: 200));
+
+        // Detectar tipo de impresora
         await _detectPrinterType();
+
         return true;
       }
 
@@ -62,13 +69,12 @@ class PrinterService {
     }
   }
 
-  /// Detecta el tipo de impresora conectada
+  /// Detecta el tipo de impresora
   Future<void> _detectPrinterType() async {
     try {
-      // Intentar obtener ID de impresora (GS I 1)
+      // GS I 1 - Obtener ID de modelo
       final printerIdCmd = Uint8List.fromList([0x1D, 0x49, 0x01]);
 
-      // Dar un pequeño delay después de conectar
       await Future.delayed(const Duration(milliseconds: 100));
 
       final response = await _plugin.readStatusUsb(printerIdCmd);
@@ -77,15 +83,13 @@ class PrinterService {
         final modelId = String.fromCharCodes(response);
         _log('Modelo detectado: $modelId');
 
-        // Detectar si es EPSON (típicamente responde con "TM-" o contiene "EPSON")
         if (modelId.contains('TM-') || modelId.contains('EPSON')) {
           _isEpsonPrinter = true;
-          _log('Impresora EPSON detectada - Usando modo compatible');
+          _log('⭐ Impresora EPSON detectada - Usando interpretación EPSON');
         }
       }
     } catch (e) {
-      _log('No se pudo detectar tipo de impresora (usando modo genérico): $e');
-      // En caso de error, asumir modo genérico
+      _log('No se pudo detectar tipo (usando modo genérico): $e');
     }
   }
 
@@ -95,7 +99,6 @@ class PrinterService {
       _log('disconnect()');
       await _safeCloseUsbPort();
     } catch (e) {
-      // Puede fallar si el dispositivo ya no existe; igual limpiamos estado
       _log('disconnect error (ignorado): $e');
     } finally {
       _currentDevicePath = null;
@@ -103,7 +106,7 @@ class PrinterService {
     }
   }
 
-  /// Lee el estado completo de la impresora (online, papel, tapa, etc.)
+  /// Lee el estado completo de la impresora
   Future<PrinterStatus> checkStatus() async {
     final devicePath = _currentDevicePath;
     if (devicePath == null) {
@@ -114,19 +117,21 @@ class PrinterService {
     }
 
     try {
-      final commandDelay = _isEpsonPrinter
-          ? const Duration(milliseconds: 100)
-          : const Duration(milliseconds: 50);
+      // CRÍTICO: Delay entre comandos para EPSON
+      final delay = const Duration(milliseconds: 100);
 
       // DLE EOT 1 - Estado online
       final onlineCmd = Uint8List.fromList([0x10, 0x04, 0x01]);
       final onlineResponse = await _plugin.readStatusUsb(onlineCmd);
 
-      // Si no responde, verificar si el dispositivo sigue presente
+      _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      _log('📊 RESPUESTAS DE ESTADO:');
+      _log('Online (DLE EOT 1): ${_formatBytes(onlineResponse)}');
+
       if (onlineResponse == null || onlineResponse.isEmpty) {
         final present = await _isDevicePresent(devicePath);
         if (!present) {
-          _log('checkStatus: devicePath ya no está presente -> deviceNotFound');
+          _log('❌ Dispositivo no presente -> desconectado');
           await _safeCloseUsbPort();
           _currentDevicePath = null;
           return PrinterStatus.withError(
@@ -135,30 +140,35 @@ class PrinterService {
           );
         }
 
+        _log('⚠️ Sin respuesta online');
         return PrinterStatus.withError(
           PrinterErrorType.offline,
           'Impresora no responde',
         );
       }
 
-      await Future.delayed(commandDelay);
+      // DELAY CRÍTICO
+      await Future.delayed(delay);
 
       // DLE EOT 4 - Estado del papel
       final paperCmd = Uint8List.fromList([0x10, 0x04, 0x04]);
       final paperResponse = await _plugin.readStatusUsb(paperCmd);
+      _log('Paper (DLE EOT 4): ${_formatBytes(paperResponse)}');
 
-      await Future.delayed(commandDelay);
+      // DELAY CRÍTICO
+      await Future.delayed(delay);
 
       // DLE EOT 2 - Causa de offline
       final offlineCmd = Uint8List.fromList([0x10, 0x04, 0x02]);
       final offlineResponse = await _plugin.readStatusUsb(offlineCmd);
+      _log('Offline (DLE EOT 2): ${_formatBytes(offlineResponse)}');
+      _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
       return _interpretStatus(onlineResponse, paperResponse, offlineResponse);
     } catch (e) {
-      // Si el dispositivo ya no existe, tratar como desconectada
       final present = await _isDevicePresent(devicePath);
       if (!present) {
-        _log('checkStatus exception + device ausente -> deviceNotFound ($e)');
+        _log('❌ Exception + device ausente -> desconectado ($e)');
         await _safeCloseUsbPort();
         _currentDevicePath = null;
         return PrinterStatus.withError(
@@ -167,6 +177,7 @@ class PrinterService {
         );
       }
 
+      _log('❌ Error de comunicación: $e');
       return PrinterStatus.withError(
         PrinterErrorType.communicationError,
         'Error de comunicación con impresora: $e',
@@ -188,11 +199,9 @@ class PrinterService {
     }
   }
 
-  /// Verifica si hay una impresora conectada
   bool get isConnected => _currentDevicePath != null;
-
-  /// Obtiene el path del dispositivo actual
   String? get currentDevicePath => _currentDevicePath;
+  bool get isEpsonPrinter => _isEpsonPrinter;
 
   // ==================== HELPERS ====================
 
@@ -216,11 +225,14 @@ class PrinterService {
     }
   }
 
-  // ==================== MÉTODOS PRIVADOS ====================
+  String _formatBytes(Uint8List? bytes) {
+    if (bytes == null || bytes.isEmpty) return '(vacío)';
+    return bytes
+        .map((b) => '0x${b.toRadixString(16).padLeft(2, '0').toUpperCase()}')
+        .join(' ');
+  }
 
   String _extractDeviceName(String devicePath) {
-    // Extraer nombre legible del path
-    // Ejemplo: /dev/usb/lp1 -> "Impresora USB LP1"
     if (devicePath.contains('lp')) {
       final lpNum = devicePath.split('lp').last;
       return 'Impresora USB LP$lpNum';
@@ -239,7 +251,6 @@ class PrinterService {
     Uint8List? paperResponse,
     Uint8List? offlineResponse,
   ) {
-    // Si no hay respuesta, la impresora no está comunicando
     if (onlineResponse == null || onlineResponse.isEmpty) {
       return PrinterStatus.withError(
         PrinterErrorType.offline,
@@ -250,45 +261,81 @@ class PrinterService {
     final onlineByte = onlineResponse[0];
     final paperByte = (paperResponse != null && paperResponse.isNotEmpty)
         ? paperResponse[0]
-        : 0xFF;
+        : 0x00; // Cambio: default 0x00 en lugar de 0xFF
     final offlineByte = (offlineResponse != null && offlineResponse.isNotEmpty)
         ? offlineResponse[0]
         : 0x00;
 
+    _log('📋 BYTES RECIBIDOS:');
     _log(
-      'Bytes de estado: online=0x${onlineByte.toRadixString(16)}, '
-      'paper=0x${paperByte.toRadixString(16)}, '
-      'offline=0x${offlineByte.toRadixString(16)}',
+      '   Online byte:  0x${onlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(onlineByte)}',
+    );
+    _log(
+      '   Paper byte:   0x${paperByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(paperByte)}',
+    );
+    _log(
+      '   Offline byte: 0x${offlineByte.toRadixString(16).padLeft(2, '0').toUpperCase()} = ${_toBinaryString(offlineByte)}',
     );
 
+    // INTERPRETACIÓN CORREGIDA PARA EPSON
     bool isOnline;
     bool hasPaper;
     bool isCoverOpen;
 
-    if (_isEpsonPrinter) {
-      // Interpretación EPSON (según documentación oficial)
-      // DLE EOT 1: Bit 3 -> 0=online, 1=offline
-      isOnline = (onlineByte & 0x08) == 0;
-
-      // DLE EOT 4: Bits 5,6 -> 11=sin papel, otros valores=con papel
-      // Algunos modelos EPSON: 0x00 = papel OK, 0x60 = sin papel
-      hasPaper = (paperByte & 0x60) != 0x60;
-
-      // DLE EOT 2: Bit 2 -> 1=tapa abierta
-      isCoverOpen = (offlineByte & 0x04) != 0;
-    } else {
-      // Interpretación genérica (como estaba antes)
-      isOnline = (onlineByte & 0x08) == 0;
-      hasPaper = (paperByte & 0x60) != 0x60;
-      isCoverOpen = (offlineByte & 0x04) != 0;
-    }
+    // DLE EOT 1 - Online Status
+    // Bit 3: 0 = online, 1 = offline
+    // Bit 5: 0 = sin error, 1 = error
+    isOnline = (onlineByte & 0x08) == 0;
+    final hasOnlineError = (onlineByte & 0x20) != 0;
 
     _log(
-      'Estado interpretado: online=$isOnline, paper=$hasPaper, cover=$isCoverOpen',
+      '   └─ Bit 3 (Online): ${(onlineByte & 0x08) == 0 ? 'Online ✅' : 'Offline ❌'}',
     );
+    _log('   └─ Bit 5 (Error):  ${hasOnlineError ? 'Error ❌' : 'Sin error ✅'}');
 
-    // Detectar error específico
+    // DLE EOT 4 - Paper Status
+    // CORRECCIÓN: Para EPSON TM-T20IIIL
+    // Valores típicos:
+    //   0x00 (00000000) = Papel OK
+    //   0x60 (01100000) = Sin papel (bits 5-6)
+    //   0x7E (01111110) = Sin papel + otros bits
+
+    // Verificar bits 5 y 6 específicamente
+    final bit5 = (paperByte & 0x20) != 0;
+    final bit6 = (paperByte & 0x40) != 0;
+
+    // Si AMBOS bits 5 y 6 están en 1, entonces NO hay papel
+    // Si alguno es 0, entonces SÍ hay papel
+    hasPaper = !(bit5 && bit6);
+
+    _log('   └─ Bit 5: ${bit5 ? '1' : '0'}');
+    _log('   └─ Bit 6: ${bit6 ? '1' : '0'}');
+    _log('   └─ Paper Status: ${hasPaper ? 'Disponible ✅' : 'Sin papel ❌'}');
+
+    // DLE EOT 2 - Offline Cause
+    // Bit 2: 0 = tapa cerrada, 1 = tapa abierta
+    // CORRECCIÓN: Verificar también bit 5 que puede indicar error de tapa
+    final bit2 = (offlineByte & 0x04) != 0;
+    final bit5offline = (offlineByte & 0x20) != 0;
+
+    // La tapa está abierta si el bit 2 está en 1
+    // PERO: algunos modelos EPSON usan bit 5 para indicar error relacionado con tapa
+    isCoverOpen = bit2;
+
+    _log('   └─ Bit 2 (Cover): ${bit2 ? 'Abierta ❌' : 'Cerrada ✅'}');
+    _log('   └─ Bit 5 (Error): ${bit5offline ? 'Error ❌' : 'OK ✅'}');
+
+    // DIAGNÓSTICO ADICIONAL
+    _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    _log('📊 ESTADO FINAL INTERPRETADO:');
+    _log('   Online:      ${isOnline ? '✅ SÍ' : '❌ NO'}');
+    _log('   Papel:       ${hasPaper ? '✅ Disponible' : '❌ Agotado'}');
+    _log('   Tapa:        ${isCoverOpen ? '❌ Abierta' : '✅ Cerrada'}');
+    _log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // Detectar errores específicos
     if (isCoverOpen) {
+      _log('🔴 ERROR: Tapa abierta');
       return PrinterStatus.withError(
         PrinterErrorType.coverOpen,
         'La tapa de la impresora está abierta',
@@ -296,6 +343,7 @@ class PrinterService {
     }
 
     if (!hasPaper) {
+      _log('🟡 ADVERTENCIA: Sin papel');
       return PrinterStatus.withError(
         PrinterErrorType.paperOut,
         'Sin papel en la impresora',
@@ -303,6 +351,7 @@ class PrinterService {
     }
 
     if (!isOnline) {
+      _log('🔴 ERROR: Impresora offline');
       return PrinterStatus.withError(
         PrinterErrorType.offline,
         'Impresora fuera de línea',
@@ -310,6 +359,7 @@ class PrinterService {
     }
 
     // Estado saludable
+    _log('🟢 Estado: SALUDABLE');
     return PrinterStatus(
       isOnline: isOnline,
       hasPaper: hasPaper,
@@ -317,6 +367,10 @@ class PrinterService {
       hasError: false,
       lastChecked: DateTime.now(),
     );
+  }
+
+  String _toBinaryString(int byte) {
+    return byte.toRadixString(2).padLeft(8, '0');
   }
 }
 

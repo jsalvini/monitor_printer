@@ -112,7 +112,7 @@ class PrinterMonitorScreen extends StatelessWidget {
           final message = state.displayErrorMessage;
           if (message == null) return;
 
-          final messenger = ScaffoldMessenger.of(context);
+          /*final messenger = ScaffoldMessenger.of(context);
           messenger.hideCurrentSnackBar();
           messenger.showSnackBar(
             SnackBar(
@@ -134,7 +134,7 @@ class PrinterMonitorScreen extends StatelessWidget {
               ),
               duration: const Duration(seconds: 4),
             ),
-          );
+          );*/
         },
         builder: (context, state) {
           return SafeArea(
